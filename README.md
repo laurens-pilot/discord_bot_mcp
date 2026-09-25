@@ -63,10 +63,24 @@ To send, give the agent the intended server/channel and message. Messages are po
 - `list_servers` returns up to 100 servers and `next_after`. Pass that value as `after` for the next page.
 - `list_channels` returns channel metadata and visible active threads, including forum posts. Channel metadata is not a permission check: Discord can list a channel while denying access to its messages. Archived threads are not listed, but a known thread ID works if the bot can access it.
 - `read_messages` defaults to 20 messages and accepts `limit` from 1 to 100. Results are newest first. Pass `next_before` as `before` for older messages, or use `message_id` to fetch one. `limit` is ignored with `message_id`. A non-null cursor means another page may exist, not that more results are guaranteed.
+- Use optional `since` (inclusive) and `until` (exclusive) to restrict message creation times. Supply ISO 8601 timestamps with `Z` or an explicit offset, with at most three fractional second digits. Either bound may be omitted; when both are supplied, `since` must be earlier than `until`. Time bounds and `before` cannot be combined with `message_id`.
 - Reads preserve message text, author, timestamp, references, attachment links, and selected embed fields. They do not return Discord's full message object. Attachment links expire; read the message again for a fresh link.
 - Forum and media channels contain posts: use a post's thread ID to read or send messages. Creating posts, searching server history, uploading files, editing, deleting, reactions, and opening DMs are outside this server's scope.
 - `send_message` accepts 1–2,000 characters of nonblank text and optionally `reply_to`. Successful sends return the message ID and channel ID.
 - Requests time out after 15 seconds. Rate-limit responses report when to try again; the process also observes Discord's reported cooldown before allowing more requests. Requests are never automatically retried. If delivery is uncertain, inspect channel history before sending again.
+
+For example, read up to 100 messages from September 24 in India:
+
+```json
+{
+  "channel_id": "948937919027105865",
+  "since": "2026-09-24T00:00:00+05:30",
+  "until": "2026-09-25T00:00:00+05:30",
+  "limit": 100
+}
+```
+
+For the next page, pass the returned `next_before` as `before` and keep the same time bounds. Stop when `next_before` is null. The server jumps directly to `until` using Discord's timestamp-based message IDs and fetches at most one page per call. It can return fewer than `limit` messages when the page reaches `since`. With only `since`, reading starts at the latest messages. With both `before` and `until`, the earlier boundary applies.
 
 ## Credentials and access
 

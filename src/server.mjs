@@ -2,7 +2,15 @@ import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { DiscordError } from "./discord.mjs";
 
-const id = z.string().regex(/^[0-9]{17,20}$/);
+const id = z.string().regex(/^[0-9]{1,20}$/);
+const timestamp = z.iso
+  .datetime({ offset: true })
+  .refine(
+    (value) => Number.isFinite(Date.parse(value)) && !/\.\d{4}/.test(value),
+    "Use a valid timestamp with at most three fractional second digits.",
+  );
+const snowflakeCeiling = 1n << 64n;
+const discordEpoch = 1420070400000n;
 const readOnly = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -21,6 +29,10 @@ const channelTypes = {
   15: "forum",
   16: "media",
 };
+
+function snowflakeAt(timestamp) {
+  return (BigInt(Date.parse(timestamp)) - discordEpoch) << 22n;
+}
 
 function messageSummary(message) {
   return {
@@ -141,16 +153,26 @@ export function createServer(discord) {
 
   register(
     "read_messages",
-    "Read channel/thread messages, newest first. Use next_before for older messages, or message_id for one message.",
+    "Read channel/thread messages, newest first. Optional since/until bound the time range. Page with next_before, keeping the bounds; message_id fetches one message.",
     z.object({
       channel_id: id,
       limit: z.number().int().min(1).max(100).default(20),
       before: id.optional(),
       message_id: id.optional(),
+      since: timestamp
+        .describe(
+          "Inclusive start: ISO 8601 with timezone, up to milliseconds.",
+        )
+        .optional(),
+      until: timestamp
+        .describe("Exclusive end: ISO 8601 with timezone, up to milliseconds.")
+        .optional(),
     }),
-    async ({ channel_id, limit, before, message_id }) => {
-      if (message_id && before)
-        throw new DiscordError("Use message_id or before, not both.");
+    async ({ channel_id, limit, before, message_id, since, until }) => {
+      if (message_id && (before || since || until))
+        throw new DiscordError(
+          "message_id cannot be combined with before, since, or until.",
+        );
       if (message_id)
         return {
           messages: [
@@ -161,16 +183,32 @@ export function createServer(discord) {
             ),
           ],
         };
+      const start = since ? snowflakeAt(since) : undefined;
+      const end = until ? snowflakeAt(until) : undefined;
+      if (start !== undefined && end !== undefined && start >= end)
+        throw new DiscordError("since must be earlier than until.");
+      const lower = start ?? 0n;
+      let upper = before ? BigInt(before) : snowflakeCeiling;
+      if (end !== undefined && end < upper) upper = end;
+      if (upper <= lower) return { messages: [], next_before: null };
       const query = new URLSearchParams({
         limit: String(limit),
-        ...(before ? { before } : {}),
+        ...(before || upper < snowflakeCeiling
+          ? { before: String(upper) }
+          : {}),
       });
       const messages = await discord.request(
         `/channels/${channel_id}/messages?${query}`,
       );
+      const inRange = messages.filter(
+        ({ id }) => BigInt(id) >= lower && BigInt(id) < upper,
+      );
       return {
-        messages: messages.map(messageSummary),
-        next_before: messages.length === limit ? messages.at(-1).id : null,
+        messages: inRange.map(messageSummary),
+        next_before:
+          messages.length === limit && BigInt(messages.at(-1).id) > lower
+            ? messages.at(-1).id
+            : null,
       };
     },
   );

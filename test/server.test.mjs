@@ -149,6 +149,251 @@ test("history defaults, exact-message reads, and older-page cursors reach the ri
   assert.equal(calls[2].path, `/channels/${channelId}/messages/${messageId}`);
 });
 
+const rangeMessages = [
+  ["1552832004096000007", "2026-09-25T00:00:00Z"],
+  ["1552832004096000000", "2026-09-25T00:00:00Z"],
+  ["1552832004091805696", "2026-09-24T23:59:59.999Z"],
+  ["1552650810163200000", "2026-09-24T12:00:00Z"],
+  ["1552469616230400003", "2026-09-24T00:00:00Z"],
+  ["1552469616230400002", "2026-09-24T00:00:00Z"],
+  ["1552469616230400000", "2026-09-24T00:00:00Z"],
+  ["1552469616230399999", "2026-09-23T23:59:59.999Z"],
+].map(([id, timestamp]) => ({ ...message, id, timestamp }));
+const range = {
+  channel_id: channelId,
+  since: "2026-09-24T00:00:00Z",
+  until: "2026-09-25T00:00:00Z",
+};
+
+function historySession(t, history = rangeMessages) {
+  return session(t, ({ path }) => {
+    const query = new URL(`https://discord.com${path}`).searchParams;
+    return history
+      .filter(
+        ({ id }) =>
+          !query.has("before") || BigInt(id) < BigInt(query.get("before")),
+      )
+      .slice(0, Number(query.get("limit")));
+  });
+}
+
+test("time ranges include the start and exclude the end, using one request", async (t) => {
+  const { call, calls } = await historySession(t);
+  const result = await call("read_messages", range);
+  assert.deepEqual(
+    result.messages.map(({ id }) => id),
+    rangeMessages.slice(2, 7).map(({ id }) => id),
+  );
+  assert.equal(result.next_before, null);
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].path,
+    `/channels/${channelId}/messages?limit=20&before=1552832004096000000`,
+  );
+});
+
+test("range pagination does not skip messages sharing the start timestamp", async (t) => {
+  const { call, calls } = await historySession(t);
+  const messages = [];
+  let before;
+  for (let page = 0; page < 3; page += 1) {
+    const result = await call("read_messages", { ...range, limit: 2, before });
+    messages.push(...result.messages);
+    before = result.next_before;
+    assert.equal(before === null, page === 2);
+  }
+  assert.deepEqual(
+    messages.map(({ id }) => id),
+    rangeMessages.slice(2, 7).map(({ id }) => id),
+  );
+  assert.equal(calls.length, 3);
+  assert.equal(
+    calls[1].path,
+    `/channels/${channelId}/messages?limit=2&before=1552650810163200000`,
+  );
+  assert.equal(
+    calls[2].path,
+    `/channels/${channelId}/messages?limit=2&before=1552469616230400002`,
+  );
+});
+
+test("timestamps with offsets select the same instants as UTC", async (t) => {
+  const { call } = await historySession(t);
+  const expected = await call("read_messages", range);
+  assert.deepEqual(
+    await call("read_messages", {
+      ...range,
+      since: "2026-09-24T05:30:00+05:30",
+      until: "2026-09-24T17:00:00-07:00",
+    }),
+    expected,
+  );
+});
+
+test("since and until work independently, and before can only narrow the upper bound", async (t) => {
+  const { call, calls } = await historySession(t);
+  const since = await call("read_messages", {
+    channel_id: channelId,
+    since: range.since,
+  });
+  assert.deepEqual(
+    since.messages.map(({ id }) => id),
+    rangeMessages.slice(0, 7).map(({ id }) => id),
+  );
+  assert.equal(calls[0].path, `/channels/${channelId}/messages?limit=20`);
+  const until = await call("read_messages", {
+    channel_id: channelId,
+    until: range.until,
+  });
+  assert.deepEqual(
+    until.messages.map(({ id }) => id),
+    rangeMessages.slice(2).map(({ id }) => id),
+  );
+  const older = await call("read_messages", {
+    ...range,
+    before: "1552650810163200000",
+  });
+  assert.deepEqual(
+    older.messages.map(({ id }) => id),
+    rangeMessages.slice(4, 7).map(({ id }) => id),
+  );
+  assert.equal(
+    calls[2].path,
+    `/channels/${channelId}/messages?limit=20&before=1552650810163200000`,
+  );
+  const newer = await call("read_messages", {
+    ...range,
+    before: "1552832004096000007",
+  });
+  assert.deepEqual(
+    newer.messages.map(({ id }) => id),
+    rangeMessages.slice(2, 7).map(({ id }) => id),
+  );
+  assert.equal(
+    calls[3].path,
+    `/channels/${channelId}/messages?limit=20&before=1552832004096000000`,
+  );
+});
+
+test("empty intervals finish without a misleading continuation cursor", async (t) => {
+  const { call, calls } = await historySession(t);
+  const empty = { messages: [], next_before: null };
+  assert.deepEqual(
+    await call("read_messages", {
+      ...range,
+      since: "2026-09-24T13:00:00Z",
+      until: "2026-09-24T14:00:00Z",
+      limit: 1,
+    }),
+    empty,
+  );
+  assert.equal(calls.length, 1);
+  assert.deepEqual(
+    await call("read_messages", { ...range, before: "1552469616230400000" }),
+    empty,
+  );
+  assert.equal(calls.length, 1);
+  assert.deepEqual(
+    await call("read_messages", {
+      channel_id: channelId,
+      since: "9999-01-01T00:00:00Z",
+    }),
+    empty,
+  );
+  assert.deepEqual(
+    await call("read_messages", {
+      channel_id: channelId,
+      until: "2014-01-01T00:00:00Z",
+    }),
+    empty,
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("wide dates do not produce invalid Discord cursors, and early IDs paginate", async (t) => {
+  const { call, calls } = await historySession(t, [
+    { ...message, id: "2", timestamp: "2015-01-01T00:00:00Z" },
+    { ...message, id: "1", timestamp: "2015-01-01T00:00:00Z" },
+  ]);
+  const wide = {
+    channel_id: channelId,
+    since: "2014-01-01T00:00:00Z",
+    until: "9999-01-01T00:00:00Z",
+    limit: 1,
+  };
+  const first = await call("read_messages", wide);
+  assert.equal(first.next_before, "2");
+  assert.equal(calls[0].path, `/channels/${channelId}/messages?limit=1`);
+  const second = await call("read_messages", {
+    ...wide,
+    before: first.next_before,
+  });
+  assert.equal(second.messages[0].id, "1");
+  assert.deepEqual(
+    await call("read_messages", { ...wide, before: second.next_before }),
+    { messages: [], next_before: null },
+  );
+});
+
+test("millisecond bounds retain all messages in the matching millisecond", async (t) => {
+  const { call } = await historySession(t, [
+    {
+      ...message,
+      id: "1552469616238788608",
+      timestamp: "2026-09-24T00:00:00.002Z",
+    },
+    {
+      ...message,
+      id: "1552469616238788607",
+      timestamp: "2026-09-24T00:00:00.001Z",
+    },
+    {
+      ...message,
+      id: "1552469616234594304",
+      timestamp: "2026-09-24T00:00:00.001Z",
+    },
+    {
+      ...message,
+      id: "1552469616234594303",
+      timestamp: "2026-09-24T00:00:00Z",
+    },
+  ]);
+  const result = await call("read_messages", {
+    channel_id: channelId,
+    since: "2026-09-24T00:00:00.001Z",
+    until: "2026-09-24T00:00:00.002Z",
+  });
+  assert.deepEqual(
+    result.messages.map(({ id }) => id),
+    ["1552469616238788607", "1552469616234594304"],
+  );
+  assert.equal(result.next_before, null);
+});
+
+test("invalid timestamps, intervals, and mixed exact-message reads fail before HTTP", async (t) => {
+  const { client, calls } = await historySession(t);
+  for (const args of [
+    { since: "2026-09-24" },
+    { since: "2026-09-24T00:00:00" },
+    { since: "2026-02-30T00:00:00Z" },
+    { since: "2026-09-24T00:00:00+24:00" },
+    { since: "2026-09-24T00:00:00.0001Z" },
+    { until: "2026-09-24T00:00:00.0001Z" },
+    { since: range.until, until: range.since },
+    { since: range.since, until: range.since },
+    { since: range.since, until: "2026-09-24T05:30:00+05:30" },
+    { message_id: messageId, since: range.since },
+    { message_id: messageId, until: range.until },
+  ]) {
+    const result = await client.callTool({
+      name: "read_messages",
+      arguments: { channel_id: channelId, ...args },
+    });
+    assert.equal(result.isError, true, JSON.stringify(args));
+  }
+  assert.equal(calls.length, 0);
+});
+
 test("message summaries preserve useful content without dumping the full Discord payload", async (t) => {
   const { call } = await session(t, () => [
     {

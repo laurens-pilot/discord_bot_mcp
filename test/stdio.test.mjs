@@ -61,6 +61,7 @@ for (const mode of ["legacy", { pin: "2026-07-28" }]) {
       `globalThis.fetch = async (url, options) => {
       if (options.headers.Authorization !== ${JSON.stringify(`Bot ${token}`)}) throw new Error("Wrong token");
       if (url === "https://discord.com/api/v10/users/@me/guilds?limit=100") return new Response(JSON.stringify([{ id: "123456789012345678", name: "Test server" }]));
+      if (url === "https://discord.com/api/v10/channels/234567890123456789/messages?limit=1&before=1552832004096000000") return new Response(JSON.stringify([{ id: "1552469616230400000", channel_id: "234567890123456789", author: { id: "123456789012345678", username: "tester" }, timestamp: "2026-09-24T00:00:00Z", content: "Inside the time range" }]));
       if (url === "https://discord.com/api/v10/channels/234567890123456789/messages" && options.method === "POST") return new Response(JSON.stringify({ id: "345678901234567890", channel_id: "234567890123456789" }));
       throw new Error("Unexpected network request");
     };`,
@@ -88,6 +89,21 @@ for (const mode of ["legacy", { pin: "2026-07-28" }]) {
       servers: [{ id: "123456789012345678", name: "Test server" }],
       next_after: null,
     });
+    const history = await client.callTool({
+      name: "read_messages",
+      arguments: {
+        channel_id: "234567890123456789",
+        since: "2026-09-24T00:00:00Z",
+        until: "2026-09-25T00:00:00Z",
+        limit: 1,
+      },
+    });
+    assert.ok(!history.isError);
+    assert.equal(
+      JSON.parse(history.content[0].text).messages[0].content,
+      "Inside the time range",
+    );
+    assert.equal(JSON.parse(history.content[0].text).next_before, null);
     const send = await client.callTool({
       name: "send_message",
       arguments: { channel_id: "234567890123456789", content: "Test message" },
