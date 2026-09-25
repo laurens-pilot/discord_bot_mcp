@@ -1,3 +1,5 @@
+import { setTimeout } from "node:timers/promises";
+
 const API = "https://discord.com/api/v10";
 const USER_AGENT =
   "DiscordBot (https://github.com/laurens-pilot/discord_bot_mcp, 0.1.0)";
@@ -7,12 +9,16 @@ export class DiscordError extends Error {}
 export class Discord {
   #token;
   #fetch;
+  #sleep;
   #queue = Promise.resolve();
-  #readyAt = 0;
+  #globalReadyAt = 0;
+  #buckets = new Map();
+  #readyAt = new Map();
 
-  constructor(token, fetchImpl = fetch) {
+  constructor(token, fetchImpl = fetch, { sleep = setTimeout } = {}) {
     this.#token = token;
     this.#fetch = fetchImpl;
+    this.#sleep = sleep;
   }
 
   request(path, body) {
@@ -21,12 +27,29 @@ export class Discord {
     return result;
   }
 
-  async #request(path, body) {
-    const wait = (this.#readyAt - Date.now()) / 1000;
-    if (wait > 0)
-      throw new DiscordError(
-        `Discord rate limit: retry in ${Math.ceil(wait)} seconds.`,
-      );
+  #rateKey(route, major) {
+    return `${this.#buckets.get(route) ?? route}:${major}`;
+  }
+
+  async #request(path, body, retries = 0, waitBudget = 5000) {
+    const method = body ? "POST" : "GET";
+    const pathname = path.split("?")[0];
+    const route = `${method} ${pathname.replace(/\/\d+/g, "/:id")}`;
+    const major = pathname.match(/^\/(channels|guilds)\/(\d+)/)?.[0] ?? "";
+    const wait =
+      Math.max(
+        this.#globalReadyAt,
+        this.#readyAt.get(this.#rateKey(route, major)) ?? 0,
+        this.#readyAt.get(`${route}:${major}`) ?? 0,
+      ) - Date.now();
+    if (wait > 0) {
+      if (body || wait > waitBudget)
+        throw new DiscordError(
+          `Discord rate limit: retry in ${Math.ceil(wait / 1000)} seconds.`,
+        );
+      await this.#sleep(wait);
+      return this.#request(path, body, retries, waitBudget - wait);
+    }
     const uncertain = body
       ? " Delivery is uncertain; read the channel before trying to send again."
       : " Try again later.";
@@ -34,7 +57,7 @@ export class Discord {
     let data;
     try {
       response = await this.#fetch(`${API}${path}`, {
-        method: body ? "POST" : "GET",
+        method,
         headers: {
           Authorization: `Bot ${this.#token}`,
           "User-Agent": USER_AGENT,
@@ -51,16 +74,42 @@ export class Discord {
       );
     }
 
+    const bucket = response.headers.get("X-RateLimit-Bucket");
+    if (bucket) this.#buckets.set(route, bucket);
+    const global =
+      response.status === 429 &&
+      (data?.global === true ||
+        response.headers.get("X-RateLimit-Global") === "true" ||
+        response.headers.get("X-RateLimit-Scope") === "global");
     const reset =
       response.status === 429
-        ? Number(data?.retry_after ?? response.headers.get("Retry-After"))
+        ? Number(
+            data?.retry_after ?? response.headers.get("Retry-After") ?? NaN,
+          )
         : response.headers.get("X-RateLimit-Remaining") === "0"
           ? Number(response.headers.get("X-RateLimit-Reset-After"))
           : 0;
-    if (Number.isFinite(reset) && reset > 0)
-      this.#readyAt = Date.now() + Math.ceil(reset * 1000);
+    if (Number.isFinite(reset) && reset > 0) {
+      const readyAt = Date.now() + Math.ceil(reset * 1000);
+      if (global) this.#globalReadyAt = Math.max(this.#globalReadyAt, readyAt);
+      else {
+        for (const key of [`${route}:${major}`, this.#rateKey(route, major)])
+          this.#readyAt.set(
+            key,
+            Math.max(this.#readyAt.get(key) ?? 0, readyAt),
+          );
+      }
+    }
 
     if (response.status === 429) {
+      if (
+        !body &&
+        retries < 2 &&
+        Number.isFinite(reset) &&
+        reset >= 0 &&
+        Math.ceil(reset * 1000) <= waitBudget
+      )
+        return this.#request(path, body, retries + 1, waitBudget);
       throw new DiscordError(
         `Discord rate limit: retry in ${reset > 0 && Number.isFinite(reset) ? Math.ceil(reset) : "a few"} seconds.`,
       );

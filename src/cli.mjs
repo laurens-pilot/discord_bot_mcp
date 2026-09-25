@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { configPath, loadToken } from "./config.mjs";
 import { Discord } from "./discord.mjs";
+import { nodeCommand } from "./node-command.mjs";
 import { createServer } from "./server.mjs";
 import { setup } from "./setup.mjs";
 
@@ -27,7 +28,7 @@ async function main() {
         {
           mcpServers: {
             discord: {
-              command: process.execPath,
+              command: await nodeCommand(),
               args: [fileURLToPath(import.meta.url)],
             },
           },

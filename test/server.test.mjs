@@ -149,6 +149,35 @@ test("history defaults, exact-message reads, and older-page cursors reach the ri
   assert.equal(calls[2].path, `/channels/${channelId}/messages/${messageId}`);
 });
 
+test("channel discovery keeps working when the channel-list bucket is exhausted", async (t) => {
+  const { call, calls } = await session(t, ({ path }) =>
+    path.endsWith("/channels")
+      ? Response.json([{ id: channelId, name: "photos", type: 0 }], {
+          headers: {
+            "X-RateLimit-Bucket": "channel-list",
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset-After": "30",
+          },
+        })
+      : {
+          threads: [
+            {
+              id: threadId,
+              name: "Discussion",
+              type: 11,
+              parent_id: channelId,
+            },
+          ],
+        },
+  );
+  const result = await call("list_channels", { server_id: serverId });
+  assert.deepEqual(
+    result.channels.map(({ id }) => id),
+    [channelId, threadId],
+  );
+  assert.equal(calls.length, 2);
+});
+
 const rangeMessages = [
   ["1552832004096000007", "2026-09-25T00:00:00Z"],
   ["1552832004096000000", "2026-09-25T00:00:00Z"],

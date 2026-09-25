@@ -24,6 +24,8 @@ npm run setup
 
 Paste the bot token into the hidden terminal prompt. Setup verifies that Discord accepts it as a bot token before saving it, then prints an MCP configuration containing the absolute paths for your machine. The token is never included in that configuration. Running setup again replaces the saved token after validation.
 
+Setup prefers a stable Node path that points to the running executable, including Homebrew's `bin/node` or `opt/<formula>/bin/node` links and matching links on your `PATH`. If none is available, it uses the current executable's path; update your MCP configuration if that installation is later removed.
+
 ## Create and invite a Discord bot
 
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and create an application, or use an existing bot you manage.
@@ -67,7 +69,7 @@ To send, give the agent the intended server/channel and message. Messages are po
 - Reads preserve message text, author, timestamp, references, attachment links, and selected embed fields. They do not return Discord's full message object. Attachment links expire; read the message again for a fresh link.
 - Forum and media channels contain posts: use a post's thread ID to read or send messages. Creating posts, searching server history, uploading files, editing, deleting, reactions, and opening DMs are outside this server's scope.
 - `send_message` accepts 1–2,000 characters of nonblank text and optionally `reply_to`. Successful sends return the message ID and channel ID.
-- Requests time out after 15 seconds. Rate-limit responses report when to try again; the process also observes Discord's reported cooldown before allowing more requests. Requests are never automatically retried. If delivery is uncertain, inspect channel history before sending again.
+- Each HTTP request times out after 15 seconds. Cooldowns are tracked per Discord bucket and server/channel, separately from global limits. Reads wait through short cooldowns and retry rate-limit responses at most twice, with a total wait budget of five seconds per request. Longer cooldowns report when to try again. Sends are never automatically retried. If delivery is uncertain, inspect channel history before sending again.
 
 For example, read up to 100 messages from September 24 in India:
 
