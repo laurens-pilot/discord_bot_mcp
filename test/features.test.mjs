@@ -127,9 +127,12 @@ test("failed multipart sends report uncertain delivery without retries", async (
 });
 
 test("MCP uses cached time ranges without history, HTTP with history, and fails closed on revoked access", async (t) => {
-  const root = await directory(t);
+  const root = await mkdtemp(join(tmpdir(), "discord-features-cache-"));
   const cache = new MessageCache(join(root, "messages.sqlite"));
-  t.after(() => cache.close());
+  t.after(async () => {
+    cache.close();
+    await rm(root, { recursive: true, force: true });
+  });
   for (const id of [
     "1552469616230400000",
     "1552469616230400001",
