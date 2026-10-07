@@ -14,7 +14,7 @@ async function main() {
     );
   if (command === "--help" || command === "help") {
     console.log(
-      "discord-bot-mcp [start|setup|doctor]\n\nsetup   Save a bot token using a hidden prompt\ndoctor  Verify the saved token with Discord (read-only)\nstart   Serve MCP over stdio (default)",
+      "discord-bot-mcp [start|setup|doctor|listen]\n\nsetup   Save a bot token using a hidden prompt\ndoctor  Verify the saved token and report cache status\nstart   Serve MCP over stdio and capture live messages (default)\nlisten  Keep capturing messages between MCP sessions",
     );
     return;
   }
@@ -42,23 +42,55 @@ async function main() {
     );
     return;
   }
-  if (command !== "start" && command !== "doctor")
+  if (!["start", "doctor", "listen"].includes(command))
     throw new Error("Unknown command. Use --help.");
-  const discord = new Discord(await loadToken());
+  const token = await loadToken();
+  const discord = new Discord(token);
+  const { MessageCache, cachePath } = await import("./cache.mjs");
+  const cache = new MessageCache(cachePath(token));
   if (command === "doctor") {
-    const identity = await discord.identity();
-    console.log(
-      `Authenticated as ${identity.name} (${identity.id}).\nCredentials: ${configPath()}\nToken check passed. Channel access and Message Content Intent still need a read_messages call.`,
-    );
+    try {
+      const identity = await discord.identity();
+      console.log(
+        `Authenticated as ${identity.name} (${identity.id}).\nCredentials: ${configPath()}\nCache: ${cache.file}\n${JSON.stringify(cache.coverage())}\nToken check passed. Channel access and Message Content Intent still need a read_messages call.`,
+      );
+    } finally {
+      cache.close();
+    }
     return;
   }
-  const handle = serveStdio(() => createServer(discord));
-  process.once("SIGINT", () => {
-    void handle.close();
-  });
-  process.once("SIGTERM", () => {
-    void handle.close();
-  });
+  const { startGateway } = await import("./gateway.mjs");
+  const gateway = startGateway(token, cache);
+  const handle =
+    command === "start"
+      ? serveStdio(() => createServer(discord, { cache }))
+      : undefined;
+  if (command === "listen")
+    console.error(
+      "Listening for Discord messages. Keep this process running for continuous capture; use doctor to check status.",
+    );
+  let closing;
+  const close = () =>
+    (closing ??= (async () => {
+      try {
+        await handle?.close();
+      } finally {
+        try {
+          await gateway.close();
+        } finally {
+          cache.close();
+        }
+      }
+    })().catch(() => {
+      process.exitCode = 1;
+    }));
+  process.once("SIGINT", close);
+  process.once("SIGTERM", close);
+  if (command === "start") {
+    process.stdin.once("end", close);
+    process.stdin.once("close", close);
+    process.stdout.once("error", close);
+  }
 }
 
 main().catch((error) => {

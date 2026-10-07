@@ -479,6 +479,7 @@ test("sends and replies suppress every mention and preserve text", async (t) => 
     method: "POST",
     body: {
       content,
+      flags: 4096,
       allowed_mentions: { parse: [], replied_user: false },
       message_reference: { message_id: messageId, fail_if_not_exists: true },
     },

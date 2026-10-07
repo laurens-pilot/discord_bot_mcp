@@ -1,6 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { DiscordError } from "./discord.mjs";
+import { channelAccess } from "./access.mjs";
+import { uploadBody } from "./uploads.mjs";
 
 const id = z.string().regex(/^[0-9]{1,20}$/);
 const timestamp = z.iso
@@ -75,7 +77,7 @@ function messageSummary(message) {
   };
 }
 
-export function createServer(discord) {
+export function createServer(discord, { cache } = {}) {
   const server = new McpServer({ name: "discord-bot-mcp", version: "0.1.0" });
   const register = (
     name,
@@ -153,7 +155,7 @@ export function createServer(discord) {
 
   register(
     "read_messages",
-    "Read channel/thread messages, newest first. Optional since/until bound the time range. Page with next_before, keeping the bounds; message_id fetches one message.",
+    "Read newest first; since/until bound creation time. Page with next_before and the same bounds, or fetch message_id. Without history permission, returns observed cache only; check coverage.",
     z.object({
       channel_id: id,
       limit: z.number().int().min(1).max(100).default(20),
@@ -173,6 +175,22 @@ export function createServer(discord) {
         throw new DiscordError(
           "message_id cannot be combined with before, since, or until.",
         );
+      const start = since ? snowflakeAt(since) : undefined;
+      const end = until ? snowflakeAt(until) : undefined;
+      if (start !== undefined && end !== undefined && start >= end)
+        throw new DiscordError("since must be earlier than until.");
+      const lower = start ?? 0n;
+      let upper = before ? BigInt(before) : snowflakeCeiling;
+      if (end !== undefined && end < upper) upper = end;
+      if (cache && !(await channelAccess(discord, channel_id)).history) {
+        const result = cache.read(channel_id, {
+          message_id,
+          lower,
+          upper,
+          limit,
+        });
+        return { ...result, messages: result.messages.map(messageSummary) };
+      }
       if (message_id)
         return {
           messages: [
@@ -183,13 +201,6 @@ export function createServer(discord) {
             ),
           ],
         };
-      const start = since ? snowflakeAt(since) : undefined;
-      const end = until ? snowflakeAt(until) : undefined;
-      if (start !== undefined && end !== undefined && start >= end)
-        throw new DiscordError("since must be earlier than until.");
-      const lower = start ?? 0n;
-      let upper = before ? BigInt(before) : snowflakeCeiling;
-      if (end !== undefined && end < upper) upper = end;
       if (upper <= lower) return { messages: [], next_before: null };
       const query = new URLSearchParams({
         limit: String(limit),
@@ -215,7 +226,7 @@ export function createServer(discord) {
 
   register(
     "send_message",
-    "Send text as the bot to a channel/thread; optionally reply. Mentions never ping. No automatic retries.",
+    "Send text and/or local files as the bot; optionally reply. Silent by default; mentions never ping. No automatic retries.",
     z.object({
       channel_id: id,
       content: z
@@ -225,14 +236,24 @@ export function createServer(discord) {
         .refine(
           (value) => value.trim().length > 0,
           "Message must not be blank.",
-        ),
+        )
+        .optional(),
       reply_to: id.optional(),
+      files: z
+        .array(z.string().min(1))
+        .min(1)
+        .max(10)
+        .describe("Absolute file paths; 24 MiB total maximum.")
+        .optional(),
+      silent: z.boolean().default(true),
     }),
-    async ({ channel_id, content, reply_to }) => {
-      const message = await discord.request(
-        `/channels/${channel_id}/messages`,
+    async ({ channel_id, content, reply_to, files, silent }) => {
+      if (!content && !files?.length)
+        throw new DiscordError("Provide content or files.");
+      const body = await uploadBody(
         {
-          content,
+          ...(content ? { content } : {}),
+          ...(silent ? { flags: 4096 } : {}),
           allowed_mentions: { parse: [], replied_user: false },
           ...(reply_to
             ? {
@@ -243,6 +264,11 @@ export function createServer(discord) {
               }
             : {}),
         },
+        files,
+      );
+      const message = await discord.request(
+        `/channels/${channel_id}/messages`,
+        body,
       );
       return { id: message.id, channel_id: message.channel_id };
     },

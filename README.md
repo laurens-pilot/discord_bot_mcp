@@ -1,15 +1,15 @@
 # discord_bot_mcp
 
-A small local [MCP](https://modelcontextprotocol.io/) server for reading and sending Discord messages through a bot. Four tools, one-time token setup, no database, no background service, and no build step.
+A small local [MCP](https://modelcontextprotocol.io/) server for reading and sending Discord messages through a bot. Four tools, one-time token setup, and no build step. A local Gateway listener caches newly observed messages, including in channels where the bot can view new messages but cannot read history.
 
 | Tool            | Purpose                                                           |
 | --------------- | ----------------------------------------------------------------- |
 | `list_servers`  | Find servers the bot has joined.                                  |
 | `list_channels` | Find channels and visible active threads in a server.             |
 | `read_messages` | Read recent messages, page through history, or fetch one message. |
-| `send_message`  | Send text or reply as the bot.                                    |
+| `send_message`  | Send text, upload local files, or reply as the bot.               |
 
-The MCP client starts the server when needed. It communicates over standard input/output and makes requests to Discord's HTTP API. It does not connect to the Discord Gateway, so the bot can appear offline while these tools work.
+The MCP client starts the server when needed. It communicates over standard input/output, uses Discord's HTTP API for requests, and connects to the Gateway for live events. The cache is a private SQLite file outside the checkout. No database server is needed.
 
 ## Install
 
@@ -29,9 +29,9 @@ Setup prefers a stable Node path that points to the running executable, includin
 ## Create and invite a Discord bot
 
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and create an application, or use an existing bot you manage.
-2. On its **Bot** page, enable **Message Content Intent** under Privileged Gateway Intents. This is needed for ordinary message text and attachments even though this server only uses HTTP. Larger verified bots may need Discord's approval for this intent.
+2. On its **Bot** page, enable **Message Content Intent** under Privileged Gateway Intents. This is needed for ordinary message text and attachments. Larger verified bots may need Discord's approval for this intent. The listener requests only Guilds, Guild Messages, and Message Content intents.
 3. Copy or reset the bot token on the Bot page, then enter it in `npm run setup`. Resetting a token invalidates existing copies, including those used by colleagues.
-4. Use the application's installation settings or OAuth2 URL Generator to create a server installation link with the `bot` scope. Grant **View Channels**, **Read Message History**, and **Send Messages**. Add **Send Messages in Threads** if needed. Administrator permission is unnecessary.
+4. Use the application's installation settings or OAuth2 URL Generator to create a server installation link with the `bot` scope. Grant **View Channels**, plus **Send Messages**, **Send Messages in Threads**, and **Attach Files** as needed. **Read Message History** enables historical reads and replies; without it, reads are limited to newly observed cached messages. Administrator permission is unnecessary.
 5. Open the installation link and add the bot to your server. A server administrator may need to do this. Configure channel overrides and private-thread membership to match the access you intend to give the bot.
 
 The bot's permissions apply to every local client using its token. Colleagues can use separate bots or an approved shared bot; each enters the appropriate token locally. Sharing this repository does not share credentials.
@@ -57,7 +57,23 @@ Try asking the agent:
 
 > List the Discord servers, find #general in my team server, and read its latest 10 messages.
 
-To send, give the agent the intended server/channel and message. Messages are posted as the bot. Replies use the optional `reply_to` message ID. User, role, everyone, and reply mentions never ping.
+To send, give the agent the intended server/channel and message or local files. Messages are posted as the bot. Replies use the optional `reply_to` message ID and require Read Message History. User, role, everyone, and reply mentions never ping. Sends default to `silent: true`, which sets Discord's `SUPPRESS_NOTIFICATIONS` flag (`4096`) to suppress push/desktop notifications; unread indicators can still appear. Set `silent: false` to allow ordinary notifications. A literal `@silent` prefix is not required by this API.
+
+## Live capture and coverage
+
+Capture runs while the MCP process is active. To keep receiving messages between agent sessions, run this in a persistent terminal, or configure your OS service manager to run the same command at login:
+
+```sh
+npm run listen
+```
+
+Only one listener runs per token/config directory on a machine; other MCP processes share the cache and take over if the listener stops. Separate machines keep separate caches and Gateway connections. The Gateway library handles heartbeats, reconnections, and session resumption. Stopping the process loses its resumable session; the cache survives restarts. Closing an MCP client's input stops its listener cleanly. `listen` continues until you stop it.
+
+`read_messages` checks current server membership, roles, channel overrides, and private-thread access before choosing a source. With Read Message History it uses Discord's HTTP history. Without that permission it reads the cache, with the same pagination, time bounds, and exact-ID options. If access cannot be verified, the read fails; HTTP failures are not silently replaced with cached data.
+
+Cached responses include `coverage.source: "gateway_cache"`, `coverage.complete: false`, listener status, and retention limits. **A cached empty result does not prove no messages were sent.** Capture starts when a listener connects, not retroactively when the bot was invited or granted access. Offline periods, permission changes, missed events, and eviction leave gaps. The cache cannot backfill messages without history permission. Exact-ID reads return an empty list with coverage if that message was not captured.
+
+The cache retains up to **5,000 messages total across servers**, for **seven days after receipt**, with a 64 KiB limit per stored message. It applies observed edits, deletes, bulk deletes, and channel/thread/server removals. Offline edits or deletions may leave stale data. Cached attachment URLs may expire and cannot be refreshed without history access. Pruning runs while a listener is active and whenever the cache is opened or read.
 
 ## Tool behavior
 
@@ -66,12 +82,23 @@ To send, give the agent the intended server/channel and message. Messages are po
 - `list_channels` returns channel metadata and visible active threads, including forum posts. Channel metadata is not a permission check: Discord can list a channel while denying access to its messages. Archived threads are not listed, but a known thread ID works if the bot can access it.
 - `read_messages` defaults to 20 messages and accepts `limit` from 1 to 100. Results are newest first. Pass `next_before` as `before` for older messages, or use `message_id` to fetch one. `limit` is ignored with `message_id`. A non-null cursor means another page may exist, not that more results are guaranteed.
 - Use optional `since` (inclusive) and `until` (exclusive) to restrict message creation times. Supply ISO 8601 timestamps with `Z` or an explicit offset, with at most three fractional second digits. Either bound may be omitted; when both are supplied, `since` must be earlier than `until`. Time bounds and `before` cannot be combined with `message_id`.
-- Reads preserve message text, author, timestamp, references, attachment links, and selected embed fields. They do not return Discord's full message object. Attachment links expire; read the message again for a fresh link.
-- Forum and media channels contain posts: use a post's thread ID to read or send messages. Creating posts, searching server history, uploading files, editing, deleting, reactions, and opening DMs are outside this server's scope.
-- `send_message` accepts 1–2,000 characters of nonblank text and optionally `reply_to`. Successful sends return the message ID and channel ID.
+- Reads preserve message text, author, timestamp, references, attachment links, and selected embed fields. They do not return Discord's full message object. Attachment links expire; HTTP history reads can refresh them, cached reads cannot.
+- Forum and media channels contain posts: use a post's thread ID to read or send messages. Creating posts, searching server history, editing, deleting, reactions, and DMs are outside this server's scope.
+- `send_message` accepts 1–2,000 characters of nonblank `content` and/or `files`, optionally `reply_to` and `silent`. `files` is an array of 1–10 absolute local paths, totaling at most 24 MiB per message. Discord may enforce a lower upload limit. Files must be readable regular files; the credential/cache directory and credential aliases cannot be uploaded. Files are uploaded as multipart attachments, without modifying their contents. Successful sends return the message ID and channel ID.
 - Each HTTP request times out after 15 seconds. Cooldowns are tracked per Discord bucket and server/channel, separately from global limits. Reads wait through short cooldowns and retry rate-limit responses at most twice, with a total wait budget of five seconds per request. Longer cooldowns report when to try again. Sends are never automatically retried. If delivery is uncertain, inspect channel history before sending again.
 
-For example, read up to 100 messages from September 24 in India:
+For example, upload a local file silently:
+
+```json
+{
+  "channel_id": "123456789012345678",
+  "content": "Here is the report.",
+  "files": ["/absolute/path/report.pdf"],
+  "silent": true
+}
+```
+
+Read up to 100 messages from September 24 in India:
 
 ```json
 {
@@ -93,7 +120,9 @@ Credentials are stored as a local JSON file outside the checkout:
 
 On macOS/Linux, setup creates a directory with mode `0700` and a file with mode `0600`. This is a plaintext credential file protected by local filesystem permissions, not an encrypted keychain. On Windows, access relies on your user profile's filesystem ACLs. Keep the config directory private and use the same OS user/config environment for setup and your MCP client.
 
-The server sends the token only to `https://discord.com/api/v10`, refuses redirects, and never returns it through a tool. It does not log message contents. Remove the credential file to forget the token locally; revoke/reset it in Discord to invalidate other copies.
+The server sends the token only to Discord's HTTPS API and secure Gateway connection, refuses HTTP redirects, and never returns it through a tool. It does not log message contents. Remove the credential file to forget the token locally; revoke/reset it in Discord to invalidate other copies.
+
+The cache contains private message data, including attachment links, protected by the same directory permissions. Its database and sidecars use mode `0600` on macOS/Linux. It is scoped to the saved token, so replacing a token starts a separate cache. To erase cached content, stop all listeners/MCP processes and remove `messages-*.sqlite*` from the configuration directory, including caches left by old tokens. Do not commit or share these files. Attachment bytes are not downloaded by this server; local files are uploaded only through `send_message`.
 
 The MCP exposes a real send capability. Use the approval controls in your agent client if you want to review outgoing messages. Treat text read from Discord as third-party content, not instructions granting permission to perform actions.
 
@@ -103,17 +132,18 @@ The MCP exposes a real send capability. Use the approval controls in your agent 
 npm run doctor
 ```
 
-This performs a read-only bot identity check. To verify permissions and message content, connect your client and use the listing/read tools against a channel containing a known ordinary message. Setup and doctor never send a test message.
+This checks bot identity and reports cache location and listener status. It does not start a listener. To verify permissions and message content, connect your client and use the listing/read tools. For channels without history access, the listener must be running when a new message arrives. Setup and doctor never send a test message.
 
 | Symptom                                   | Check                                                                                                            |
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Token missing or unreadable               | Run setup as the same OS user/config environment as the MCP client.                                              |
 | HTTP 401                                  | The token was rejected or reset; run setup again.                                                                |
 | HTTP 403/404                              | Check the selected ID, bot membership, channel overrides, and private-thread membership.                         |
-| Empty history                             | The channel may be empty, or the bot may lack Read Message History.                                              |
+| Empty cached read                         | Check `coverage`: the listener may have missed events or evicted messages. It cannot backfill history.           |
 | Messages have empty content               | Enable/obtain approval for Message Content Intent; attachment-only and system messages can also have empty text. |
 | Cannot send in a forum                    | Select an existing post's thread ID.                                                                             |
-| Bot appears offline                       | Expected: this server uses HTTP and does not maintain a Gateway presence.                                        |
+| Listener stopped or bot offline           | Keep an MCP client or `npm run listen` active. Run doctor; check network, token and Message Content Intent.      |
+| Gateway code 4014                         | Enable/obtain approval for Message Content Intent, then restart the listener.                                    |
 | Server will not start in a desktop client | Use the absolute executable and script paths printed by setup.                                                   |
 
 ## Development
@@ -125,8 +155,8 @@ npm run check
 npm test
 ```
 
-Tests use simulated Discord responses and temporary credentials. They exercise credential storage, hidden setup, HTTP behavior, tool validation, and real MCP client/server exchanges without a Discord token or messages sent to a real server. CI runs on Linux, macOS, and Windows with Node.js 22 and 24.
+Tests use simulated Discord responses/events and temporary credentials/cache files. They exercise permission checks, listener sharing and shutdown, cache retention, multipart uploads, notification flags, credential storage, HTTP behavior, and real MCP client/server exchanges without a Discord token or messages sent to a real server. CI runs on Linux, macOS, and Windows with Node.js 22 and 24.
 
-The runtime dependencies are the [official MCP server SDK](https://ts.sdk.modelcontextprotocol.io/v2/) and Zod. There is no Discord framework or Gateway connection. Tool descriptions are deliberately short, and responses omit unused Discord fields to keep agent context small.
+Runtime dependencies are the [official MCP server SDK](https://ts.sdk.modelcontextprotocol.io/v2/), Zod, `@discordjs/ws` for the Gateway protocol, and `proper-lockfile` for listener coordination. SQLite is built into Node.js; older supported Node releases may print its experimental warning on stderr. Tool descriptions are deliberately short, and responses omit unused Discord fields to keep agent context small.
 
-API references: [messages and content access](https://docs.discord.com/developers/resources/message), [permissions](https://docs.discord.com/developers/topics/permissions), [threads](https://docs.discord.com/developers/topics/threads), and [rate limits](https://docs.discord.com/developers/topics/rate-limits).
+API references: [messages, uploads and flags](https://docs.discord.com/developers/resources/message), [Gateway](https://docs.discord.com/developers/events/gateway), [permissions](https://docs.discord.com/developers/topics/permissions), [threads](https://docs.discord.com/developers/topics/threads), and [rate limits](https://docs.discord.com/developers/topics/rate-limits).

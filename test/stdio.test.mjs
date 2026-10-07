@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { setTimeout } from "node:timers/promises";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -51,6 +53,47 @@ test("setup refuses token arguments and piped tokens without echoing them", asyn
   }
 });
 
+test(
+  "stdin EOF exits cleanly even while the Gateway connection is stalled",
+  { timeout: 8000 },
+  async (t) => {
+    const { root, env } = await environment(t);
+    await saveToken(token, configPath(env));
+    const preload = join(root, "stalled-discord.mjs");
+    await writeFile(
+      preload,
+      "globalThis.fetch = () => new Promise(() => {});\n",
+    );
+    const child = spawn(
+      process.execPath,
+      ["--import", pathToFileURL(preload).href, cli],
+      { env },
+    );
+    t.after(() => {
+      if (child.exitCode === null) child.kill();
+    });
+    child.stdin.write(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "shutdown-test", version: "1" },
+        },
+      }) + "\n",
+    );
+    await once(child.stdout, "data");
+    await setTimeout(100);
+    const closed = once(child, "exit");
+    child.stdin.end();
+    const [code, signal] = await closed;
+    assert.equal(code, 0);
+    assert.equal(signal, null);
+  },
+);
+
 for (const mode of ["legacy", { pin: "2026-07-28" }]) {
   test(`stdio MCP works after restart from another directory (${JSON.stringify(mode)})`, async (t) => {
     const { root, env } = await environment(t);
@@ -60,6 +103,10 @@ for (const mode of ["legacy", { pin: "2026-07-28" }]) {
       preload,
       `globalThis.fetch = async (url, options) => {
       if (options.headers.Authorization !== ${JSON.stringify(`Bot ${token}`)}) throw new Error("Wrong token");
+      if (url === "https://discord.com/api/v10/users/@me") return Response.json({ id: "9", bot: true, username: "test" });
+      if (url === "https://discord.com/api/v10/channels/234567890123456789") return Response.json({ guild_id: "1", type: 0, permission_overwrites: [] });
+      if (url === "https://discord.com/api/v10/guilds/1/members/9") return Response.json({ roles: [] });
+      if (url === "https://discord.com/api/v10/guilds/1/roles") return Response.json([{ id: "1", permissions: "66560" }]);
       if (url === "https://discord.com/api/v10/users/@me/guilds?limit=100") return new Response(JSON.stringify([{ id: "123456789012345678", name: "Test server" }]));
       if (url === "https://discord.com/api/v10/channels/234567890123456789/messages?limit=1&before=1552832004096000000") return new Response(JSON.stringify([{ id: "1552469616230400000", channel_id: "234567890123456789", author: { id: "123456789012345678", username: "tester" }, timestamp: "2026-09-24T00:00:00Z", content: "Inside the time range" }]));
       if (url === "https://discord.com/api/v10/channels/234567890123456789/messages" && options.method === "POST") return new Response(JSON.stringify({ id: "345678901234567890", channel_id: "234567890123456789" }));
@@ -111,6 +158,13 @@ for (const mode of ["legacy", { pin: "2026-07-28" }]) {
     assert.equal(JSON.parse(send.content[0].text).id, "345678901234567890");
     assert.ok(!JSON.stringify([read, send]).includes(token));
     await client.close();
-    assert.equal(stderr, "");
+    assert.ok(!stderr.includes(token));
+    assert.equal(
+      stderr.replace(
+        /\(node:\d+\) ExperimentalWarning: SQLite[^\n]*\n(?:\(Use `node[^\n]*\n)?/g,
+        "",
+      ),
+      "",
+    );
   });
 }

@@ -61,9 +61,16 @@ export class Discord {
         headers: {
           Authorization: `Bot ${this.#token}`,
           "User-Agent": USER_AGENT,
-          ...(body ? { "Content-Type": "application/json" } : {}),
+          ...(body && !(body instanceof FormData)
+            ? { "Content-Type": "application/json" }
+            : {}),
         },
-        body: body ? JSON.stringify(body) : undefined,
+        body:
+          body instanceof FormData
+            ? body
+            : body
+              ? JSON.stringify(body)
+              : undefined,
         signal: AbortSignal.timeout(15000),
         redirect: "error",
       });
