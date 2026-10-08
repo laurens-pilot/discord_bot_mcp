@@ -1,11 +1,12 @@
 # discord_bot_mcp
 
-A small local [MCP](https://modelcontextprotocol.io/) server for reading and sending Discord messages through a bot. Fourteen focused tools, one-time token setup, and no build step. A local Gateway listener caches newly observed messages, including in channels where the bot can view new messages but cannot read history.
+A small local [MCP](https://modelcontextprotocol.io/) server for reading and sending Discord messages through a bot. Fifteen focused tools, one-time token setup, and no build step. A local Gateway listener caches newly observed messages, including in channels where the bot can view new messages but cannot read history.
 
 | Tool                  | Purpose                                                                |
 | --------------------- | ---------------------------------------------------------------------- |
 | `list_servers`        | Find servers the bot has joined.                                       |
 | `list_channels`       | Find channels and active threads; optionally inspect permissions.      |
+| `list_emojis`         | Find server custom emojis and their reaction/message formats.          |
 | `read_messages`       | Read history or observed cache, including reactions and polls.         |
 | `search_messages`     | Search with every documented Discord filter, or search observed cache. |
 | `send_message`        | Send text, files, replies, or a poll; silent by default.               |
@@ -176,6 +177,7 @@ For channels without history, repeat the search with `source: "cache"`. This exp
 - `edit_message(channel_id, message_id, content)` changes only text, preserving attachments and existing message flags. Empty content clears text when Discord permits it. Mentions are suppressed on every edit.
 - `delete_message(channel_id, message_id)` deletes only the bot's own message, even when the bot has Administrator or Manage Messages. Both tools recheck channel access and verify authorship through HTTP history, captured author data, or a successful-send receipt. If ownership cannot be verified, they refuse. Send receipts persist in the token-scoped cache, capped at 5,000 entries for seven days.
 - `list_threads(channel_id, before?, limit?)` returns archived public threads/posts with `limit` 2–100 (default 25); `list_pins` returns pinned messages. Both require history permission and return a `next_before` timestamp. Pass it back unchanged, including fractional seconds. These tools do not archive threads or pin messages.
+- `list_emojis(server_id, name?)` lists server custom emojis. Omit `name` for all, or supply an exact case-insensitive name such as `wave` or `:wave:`. Every matching emoji is returned, including duplicate names. Each result includes `id`, `name`, `animated`, and ready-to-use `reaction` (`name:id`) and `message` (`<:name:id>` or `<a:name:id>`) strings. Copy `reaction` into `set_reaction` or `list_reaction_users`, or include `message` in message content. Bare `:name:` shorthand is not automatically expanded by send/reaction tools. Discord's `available` flag is included when provided; `role_ids` lists role restrictions when present. Availability does not guarantee the bot can use the emoji in a particular channel. This is a fresh read, not a cached lookup; a permission error is not an empty emoji list.
 - `set_reaction(channel_id, message_id, emoji, remove?)` adds a normal reaction or removes only the bot's own reaction. Use Unicode such as `👍`, `name:id`, or Discord's `<:name:id>` format. Adding requires history permission, and a new emoji also requires Add Reactions. Reaction endpoints have no silent flag.
 - `list_reaction_users` takes the same message/emoji, optional `burst: true` for super reactions, and `after`/`limit`. `list_poll_voters` takes a numeric `answer_id` from a message's poll. Both return compact users and `next_after`.
 - Add a poll to `send_message` using `poll: {"question":"When?","answers":["Today","Tomorrow"],"duration_hours":24,"allow_multiselect":false}`. Questions support 300 characters, 2–10 answers support 55 characters each, and duration is 1–768 hours. Text and attachments may accompany the poll; sends remain silent by default.

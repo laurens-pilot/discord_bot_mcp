@@ -56,7 +56,7 @@ async function session(t, handler) {
   };
 }
 
-test("exactly fourteen compact tools with correct read/write annotations", async (t) => {
+test("exactly fifteen compact tools with correct read/write annotations", async (t) => {
   const { client, calls } = await session(t, () => {
     throw new Error("No network during discovery");
   });
@@ -69,6 +69,7 @@ test("exactly fourteen compact tools with correct read/write annotations", async
       "read_messages",
       "send_message",
       "create_thread",
+      "list_emojis",
       "search_messages",
       "edit_message",
       "delete_message",
@@ -89,6 +90,7 @@ test("exactly fourteen compact tools with correct read/write annotations", async
       false,
       false,
       true,
+      true,
       false,
       false,
       true,
@@ -104,7 +106,7 @@ test("exactly fourteen compact tools with correct read/write annotations", async
   assert.equal(tools[4].annotations.destructiveHint, false);
   const size = Buffer.byteLength(JSON.stringify(tools));
   assert.ok(size < 15000, `Tool catalog grew to ${size} bytes`);
-  t.diagnostic(`Fourteen-tool catalog: ${size} JSON bytes`);
+  t.diagnostic(`Fifteen-tool catalog: ${size} JSON bytes`);
   assert.equal(calls.length, 0);
 });
 

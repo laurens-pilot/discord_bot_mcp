@@ -95,6 +95,133 @@ async function fixture(
   return { call, ok, calls, cache, client };
 }
 
+test("emoji discovery returns compact static and animated formats without claiming unrestricted use", async (t) => {
+  const { ok, calls } = await fixture(t, {
+    handle: ({ path }) => {
+      assert.equal(path, "/guilds/100/emojis");
+      return [
+        {
+          id: "123",
+          name: "hello",
+          animated: false,
+          available: true,
+          roles: [],
+          user: { id: "99", username: "creator" },
+          managed: true,
+        },
+        {
+          id: "456",
+          name: "wave",
+          animated: true,
+          available: false,
+          roles: ["789"],
+        },
+        { id: "567", name: "unknown_availability" },
+      ];
+    },
+  });
+  assert.deepEqual(await ok("list_emojis", { server_id: "100" }), {
+    emojis: [
+      {
+        id: "123",
+        name: "hello",
+        animated: false,
+        available: true,
+        reaction: "hello:123",
+        message: "<:hello:123>",
+      },
+      {
+        id: "456",
+        name: "wave",
+        animated: true,
+        available: false,
+        role_ids: ["789"],
+        reaction: "wave:456",
+        message: "<a:wave:456>",
+      },
+      {
+        id: "567",
+        name: "unknown_availability",
+        animated: false,
+        reaction: "unknown_availability:567",
+        message: "<:unknown_availability:567>",
+      },
+    ],
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "GET");
+});
+
+test("emoji name lookup accepts colon shorthand, preserves duplicate names and reads fresh data", async (t) => {
+  const items = [
+    { id: "123", name: "Wave" },
+    { id: "456", name: "Wave" },
+    { id: "789", name: "wave_extra" },
+  ];
+  const { ok, calls } = await fixture(t, {
+    handle: () => items,
+  });
+  for (const name of ["wave", " :WAVE: "]) {
+    const { emojis } = await ok("list_emojis", { server_id: "100", name });
+    assert.deepEqual(
+      emojis.map((item) => item.id),
+      ["123", "456"],
+    );
+    assert.equal(emojis[0].reaction, "Wave:123");
+  }
+  assert.deepEqual(await ok("list_emojis", { server_id: "100", name: "wav" }), {
+    emojis: [],
+  });
+  items.splice(0);
+  assert.deepEqual(await ok("list_emojis", { server_id: "100" }), {
+    emojis: [],
+  });
+  assert.equal(calls.length, 4);
+});
+
+test("emoji lookup rejects invalid arguments and keeps access failures distinct from no matches", async (t) => {
+  let response = Response.json({ code: 50001 }, { status: 403 });
+  const { call, calls } = await fixture(t, {
+    handle: () => response,
+  });
+  for (const args of [
+    { server_id: "../100" },
+    { server_id: "100", name: " " },
+    { server_id: "100", name: "x".repeat(101) },
+    { server_id: "100", unsupported: true },
+  ])
+    assert.equal((await call("list_emojis", args)).isError, true);
+  assert.equal(calls.length, 0);
+  const denied = await call("list_emojis", { server_id: "100" });
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0].text, /denied access/i);
+  response = { unexpected: [] };
+  const malformed = await call("list_emojis", { server_id: "100" });
+  assert.equal(malformed.isError, true);
+  assert.match(malformed.content[0].text, /unexpected emoji list/i);
+});
+
+test("discovered emoji formats can be used directly in reactions and message content", async (t) => {
+  const { ok, calls } = await fixture(t, {
+    handle: ({ path, method }) => {
+      if (path === "/guilds/100/emojis")
+        return [{ id: "123", name: "wave", animated: true }];
+      if (path.includes("/reactions/") && method === "PUT")
+        return new Response(null, { status: 204 });
+      if (path === "/channels/200/messages" && method === "POST")
+        return message;
+    },
+  });
+  const { emojis } = await ok("list_emojis", { server_id: "100" });
+  await ok("set_reaction", { ...target, emoji: emojis[0].reaction });
+  assert.equal(
+    calls.at(-1).path,
+    "/channels/200/messages/300/reactions/wave%3A123/@me",
+  );
+  await ok("send_message", { channel_id: "200", content: emojis[0].message });
+  assert.equal(calls.at(-1).body.content, "<a:wave:123>");
+});
+
 test("search exposes every documented filter and encodes repeated arrays without changing text", async (t) => {
   const query = {
     content: '"summer trip" & café',

@@ -84,6 +84,36 @@ export function registerFeatures(register, discord, cache) {
   };
 
   register(
+    "list_emojis",
+    "List server custom emojis, optionally by exact name (:name: accepted, case-insensitive). Returns reaction/message formats. Availability is not a permission guarantee.",
+    z.strictObject({ server_id: id, name: nonblank(100).optional() }),
+    async ({ server_id, name }) => {
+      const result = await discord.request(`/guilds/${server_id}/emojis`);
+      if (!Array.isArray(result))
+        throw new DiscordError("Discord returned an unexpected emoji list.");
+      const match = name
+        ?.trim()
+        .replace(/^:([^:]+):$/, "$1")
+        .toLowerCase();
+      return {
+        emojis: result
+          .filter((item) => !match || item.name?.toLowerCase() === match)
+          .map((item) => ({
+            id: item.id,
+            name: item.name,
+            animated: Boolean(item.animated),
+            ...(typeof item.available === "boolean"
+              ? { available: item.available }
+              : {}),
+            ...(item.roles?.length ? { role_ids: item.roles } : {}),
+            reaction: `${item.name}:${item.id}`,
+            message: `<${item.animated ? "a" : ""}:${item.name}:${item.id}>`,
+          })),
+      };
+    },
+  );
+
+  register(
     "search_messages",
     "Search server messages. All Discord filters supported; author_type/has allow -negation. since/until are inclusive/exclusive. Page with next_offset. source=cache searches retained literal text/channel/author/time only; check coverage.",
     searchInput,

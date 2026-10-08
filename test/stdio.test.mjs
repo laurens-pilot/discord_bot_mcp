@@ -107,6 +107,7 @@ for (const mode of ["legacy", { pin: "2026-07-28" }]) {
       if (url === "https://discord.com/api/v10/channels/234567890123456789") return Response.json({ guild_id: "1", type: 0, permission_overwrites: [] });
       if (url === "https://discord.com/api/v10/guilds/1/members/9") return Response.json({ roles: [] });
       if (url === "https://discord.com/api/v10/guilds/1/roles") return Response.json([{ id: "1", permissions: "66560" }]);
+      if (url === "https://discord.com/api/v10/guilds/1/emojis") return Response.json([{ id: "123", name: "wave", animated: true, available: true, roles: [] }]);
       if (url === "https://discord.com/api/v10/users/@me/guilds?limit=100") return new Response(JSON.stringify([{ id: "123456789012345678", name: "Test server" }]));
       if (url === "https://discord.com/api/v10/channels/234567890123456789/messages?limit=1&before=1552832004096000000") return new Response(JSON.stringify([{ id: "1552469616230400000", channel_id: "234567890123456789", author: { id: "123456789012345678", username: "tester" }, timestamp: "2026-09-24T00:00:00Z", content: "Inside the time range" }]));
       if (url === "https://discord.com/api/v10/channels/234567890123456789/messages" && options.method === "POST") return new Response(JSON.stringify({ id: "345678901234567890", channel_id: "234567890123456789" }));
@@ -135,7 +136,16 @@ for (const mode of ["legacy", { pin: "2026-07-28" }]) {
     });
     t.after(() => client.close());
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 14);
+    assert.equal((await client.listTools()).tools.length, 15);
+    const emojis = await client.callTool({
+      name: "list_emojis",
+      arguments: { server_id: "1", name: ":WAVE:" },
+    });
+    assert.ok(!emojis.isError, JSON.stringify(emojis));
+    assert.equal(
+      JSON.parse(emojis.content[0].text).emojis[0].message,
+      "<a:wave:123>",
+    );
     const read = await client.callTool({ name: "list_servers", arguments: {} });
     assert.deepEqual(JSON.parse(read.content[0].text), {
       servers: [{ id: "123456789012345678", name: "Test server" }],
