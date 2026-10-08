@@ -217,15 +217,28 @@ export function createServer(discord, { cache } = {}) {
         .describe("Absolute file paths; 24 MiB total maximum.")
         .optional(),
       silent: z.boolean().default(true),
+      suppress_embeds: z
+        .boolean()
+        .default(false)
+        .describe("Hide link previews while keeping links clickable."),
       poll: pollInput.optional(),
     }),
-    async ({ channel_id, content, reply_to, files, silent, poll }) => {
+    async ({
+      channel_id,
+      content,
+      reply_to,
+      files,
+      silent,
+      suppress_embeds,
+      poll,
+    }) => {
       if (!content && !files?.length && !poll)
         throw new DiscordError("Provide content, files or a poll.");
+      const flags = (silent ? 4096 : 0) | (suppress_embeds ? 4 : 0);
       const body = await uploadBody(
         {
           ...(content ? { content } : {}),
-          ...(silent ? { flags: 4096 } : {}),
+          ...(flags ? { flags } : {}),
           allowed_mentions: { parse: [], replied_user: false },
           ...(poll ? { poll: pollBody(poll) } : {}),
           ...(reply_to

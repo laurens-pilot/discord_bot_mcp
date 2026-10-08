@@ -68,9 +68,10 @@ test("MCP uploads file-only and text replies with silent flags and no mention pi
     files: [files[0]],
     reply_to: "5",
     silent: false,
+    suppress_embeds: true,
   });
   const reply = JSON.parse(calls[1].body.get("payload_json"));
-  assert.equal(reply.flags, undefined);
+  assert.equal(reply.flags, 4);
   assert.equal(reply.content, "@everyone test");
   assert.equal(reply.message_reference.message_id, "5");
   for (const args of [

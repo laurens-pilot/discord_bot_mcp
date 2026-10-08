@@ -526,6 +526,25 @@ test("sends and replies suppress every mention and preserve text", async (t) => 
   assert.ok(!("message_reference" in calls[1].body));
 });
 
+test("embed suppression combines independently with silent delivery and preserves links", async (t) => {
+  const { call, calls } = await session(t, () => message);
+  const content = "See https://example.com and [details](https://example.org).";
+  for (const [options, flags] of [
+    [{}, 4096],
+    [{ suppress_embeds: false }, 4096],
+    [{ suppress_embeds: true }, 4100],
+    [{ silent: false, suppress_embeds: true }, 4],
+    [{ silent: false, suppress_embeds: false }, undefined],
+  ]) {
+    await call("send_message", { channel_id: channelId, content, ...options });
+    assert.deepEqual(calls.at(-1).body, {
+      content,
+      ...(flags === undefined ? {} : { flags }),
+      allowed_mentions: { parse: [], replied_user: false },
+    });
+  }
+});
+
 test("invalid tool arguments cannot reach Discord", async (t) => {
   const { client, calls } = await session(t, () => message);
   for (const [name, args] of [
@@ -541,6 +560,10 @@ test("invalid tool arguments cannot reach Discord", async (t) => {
     ["send_message", { channel_id: channelId, content: " \n " }],
     ["send_message", { channel_id: channelId, content: "x".repeat(2001) }],
     ["send_message", { content: "hello" }],
+    [
+      "send_message",
+      { channel_id: channelId, content: "hello", suppress_embeds: "true" },
+    ],
   ]) {
     const result = await client.callTool({ name, arguments: args });
     assert.equal(result.isError, true, JSON.stringify(args));
