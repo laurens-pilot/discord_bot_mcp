@@ -19,6 +19,7 @@ const readOnly = {
   idempotentHint: true,
   openWorldHint: true,
 };
+const write = { ...readOnly, readOnlyHint: false, idempotentHint: false };
 const channelTypes = {
   0: "text",
   2: "voice",
@@ -272,12 +273,47 @@ export function createServer(discord, { cache } = {}) {
       );
       return { id: message.id, channel_id: message.channel_id };
     },
-    {
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
-      openWorldHint: true,
+    write,
+  );
+
+  register(
+    "create_thread",
+    "Create a public thread in a text channel, or on message_id in text/announcement channels. Use thread_id to read/send. Creation has no silent flag. No retries.",
+    z.strictObject({
+      channel_id: id,
+      name: z
+        .string()
+        .min(1)
+        .max(100)
+        .refine(
+          (value) => value.trim().length > 0,
+          "Thread name must not be blank.",
+        ),
+      message_id: id.optional(),
+    }),
+    async ({ channel_id, name, message_id }) => {
+      const channel = await discord.request(`/channels/${channel_id}`);
+      if (!channel.guild_id || ![0, 5].includes(channel.type))
+        throw new DiscordError(
+          "Use a server text or announcement channel as the parent. Forum posts and private threads are not supported.",
+        );
+      if (channel.type === 5 && !message_id)
+        throw new DiscordError(
+          "Announcement channels require message_id to start a thread.",
+        );
+      const thread = await discord.request(
+        message_id
+          ? `/channels/${channel_id}/messages/${message_id}/threads`
+          : `/channels/${channel_id}/threads`,
+        { name, ...(!message_id ? { type: 11 } : {}) },
+      );
+      if (!id.safeParse(thread?.id).success || thread?.parent_id !== channel_id)
+        throw new DiscordError(
+          "Discord returned an unexpected thread response. Thread creation is uncertain; use list_channels to check before trying again.",
+        );
+      return { thread_id: thread.id, parent_id: thread.parent_id };
     },
+    write,
   );
 
   return server;

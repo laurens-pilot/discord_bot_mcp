@@ -51,7 +51,9 @@ export class Discord {
       return this.#request(path, body, retries, waitBudget - wait);
     }
     const uncertain = body
-      ? " Delivery is uncertain; read the channel before trying to send again."
+      ? pathname.endsWith("/threads")
+        ? " Thread creation is uncertain; use list_channels to check for the thread before trying again."
+        : " Delivery is uncertain; read the channel before trying to send again."
       : " Try again later.";
     let response;
     let data;

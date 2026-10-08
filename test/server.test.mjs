@@ -56,23 +56,31 @@ async function session(t, handler) {
   };
 }
 
-test("exactly four compact tools with correct read/write annotations", async (t) => {
+test("exactly five compact tools with correct read/write annotations", async (t) => {
   const { client, calls } = await session(t, () => {
     throw new Error("No network during discovery");
   });
   const { tools } = await client.listTools();
   assert.deepEqual(
     tools.map(({ name }) => name),
-    ["list_servers", "list_channels", "read_messages", "send_message"],
+    [
+      "list_servers",
+      "list_channels",
+      "read_messages",
+      "send_message",
+      "create_thread",
+    ],
   );
   assert.deepEqual(
     tools.map(({ annotations }) => annotations.readOnlyHint),
-    [true, true, true, false],
+    [true, true, true, false, false],
   );
   assert.equal(tools[3].annotations.idempotentHint, false);
+  assert.equal(tools[4].annotations.idempotentHint, false);
+  assert.equal(tools[4].annotations.destructiveHint, false);
   const size = Buffer.byteLength(JSON.stringify(tools));
   assert.ok(size < 4000, `Tool catalog grew to ${size} bytes`);
-  t.diagnostic(`Four-tool catalog: ${size} JSON bytes`);
+  t.diagnostic(`Five-tool catalog: ${size} JSON bytes`);
   assert.equal(calls.length, 0);
 });
 
@@ -523,4 +531,159 @@ test("Discord failures are MCP tool errors, with no credential leakage", async (
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /permissions/);
   assert.ok(!JSON.stringify(result).includes(token));
+});
+
+test("standalone threads explicitly request public visibility and return a usable ID", async (t) => {
+  const { call, calls } = await session(t, ({ method }) =>
+    method === "GET"
+      ? { id: channelId, guild_id: serverId, type: 0 }
+      : {
+          id: threadId,
+          parent_id: channelId,
+          type: 11,
+          name: "Topic",
+          unused: "discard",
+        },
+  );
+  assert.deepEqual(
+    await call("create_thread", { channel_id: channelId, name: "Topic" }),
+    {
+      thread_id: threadId,
+      parent_id: channelId,
+    },
+  );
+  assert.deepEqual(calls, [
+    { path: `/channels/${channelId}`, method: "GET", body: undefined },
+    {
+      path: `/channels/${channelId}/threads`,
+      method: "POST",
+      body: { name: "Topic", type: 11 },
+    },
+  ]);
+});
+
+test("message threads use the message endpoint in text and announcement channels without fetching history", async (t) => {
+  for (const type of [0, 5]) {
+    const { call, calls } = await session(t, ({ method }) =>
+      method === "GET"
+        ? { id: channelId, guild_id: serverId, type }
+        : { id: messageId, parent_id: channelId },
+    );
+    const result = await call("create_thread", {
+      channel_id: channelId,
+      name: "Follow-up",
+      message_id: messageId,
+    });
+    assert.equal(result.thread_id, messageId);
+    assert.deepEqual(calls, [
+      { path: `/channels/${channelId}`, method: "GET", body: undefined },
+      {
+        path: `/channels/${channelId}/messages/${messageId}/threads`,
+        method: "POST",
+        body: { name: "Follow-up" },
+      },
+    ]);
+  }
+});
+
+test("unsupported thread parents and announcement threads without a source message fail before creation", async (t) => {
+  for (const type of [1, 2, 3, 4, 5, 10, 11, 12, 13, 15, 16]) {
+    const { client, calls } = await session(t, () => ({
+      guild_id: serverId,
+      type,
+    }));
+    const result = await client.callTool({
+      name: "create_thread",
+      arguments: { channel_id: channelId, name: "Topic" },
+    });
+    assert.equal(result.isError, true, `Channel type ${type}`);
+    assert.deepEqual(
+      calls.map((c) => c.method),
+      ["GET"],
+    );
+  }
+  for (const type of [1, 11, 15, 16]) {
+    const { client, calls } = await session(t, () => ({
+      guild_id: serverId,
+      type,
+    }));
+    const result = await client.callTool({
+      name: "create_thread",
+      arguments: {
+        channel_id: channelId,
+        name: "Topic",
+        message_id: messageId,
+      },
+    });
+    assert.equal(result.isError, true);
+    assert.deepEqual(
+      calls.map((c) => c.method),
+      ["GET"],
+    );
+  }
+});
+
+test("invalid thread arguments and unsupported private/silent options cannot reach Discord", async (t) => {
+  const { client, calls } = await session(t, () =>
+    assert.fail("Unexpected request"),
+  );
+  for (const args of [
+    { channel_id: channelId },
+    { name: "Topic" },
+    { channel_id: "../users/@me", name: "Topic" },
+    { channel_id: channelId, name: "" },
+    { channel_id: channelId, name: " \n " },
+    { channel_id: channelId, name: "x".repeat(101) },
+    { channel_id: channelId, name: "Topic", message_id: "../threads" },
+    { channel_id: channelId, name: "Topic", private: true },
+    { channel_id: channelId, name: "Topic", silent: true },
+  ]) {
+    const result = await client.callTool({
+      name: "create_thread",
+      arguments: args,
+    });
+    assert.equal(result.isError, true, JSON.stringify(args));
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("failed thread creation is never retried and reports how to check ambiguous outcomes", async (t) => {
+  for (const [response, expected] of [
+    [
+      () => {
+        throw new Error(token);
+      },
+      /Thread creation is uncertain.*list_channels/,
+    ],
+    [
+      () => new Response("unreadable"),
+      /Thread creation is uncertain.*list_channels/,
+    ],
+    [() => Response.json({}), /Thread creation is uncertain.*list_channels/],
+    [
+      () => Response.json({}, { status: 502 }),
+      /Thread creation is uncertain.*list_channels/,
+    ],
+    [() => Response.json({ message: token }, { status: 403 }), /permissions/],
+    [
+      () => Response.json({ code: 160004 }, { status: 400 }),
+      /HTTP 400, code 160004/,
+    ],
+    [() => Response.json({ retry_after: 0 }, { status: 429 }), /rate limit/],
+  ]) {
+    const { client, calls } = await session(t, ({ method }) =>
+      method === "GET" ? { guild_id: serverId, type: 0 } : response(),
+    );
+    const result = await client.callTool({
+      name: "create_thread",
+      arguments: { channel_id: channelId, name: "Topic" },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, expected);
+    assert.ok(!JSON.stringify(result).includes(token));
+    assert.deepEqual(
+      calls.map((c) => c.method),
+      ["GET", "POST"],
+    );
+  }
 });

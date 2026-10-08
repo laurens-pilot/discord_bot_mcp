@@ -1,6 +1,6 @@
 # discord_bot_mcp
 
-A small local [MCP](https://modelcontextprotocol.io/) server for reading and sending Discord messages through a bot. Four tools, one-time token setup, and no build step. A local Gateway listener caches newly observed messages, including in channels where the bot can view new messages but cannot read history.
+A small local [MCP](https://modelcontextprotocol.io/) server for reading and sending Discord messages through a bot. Five tools, one-time token setup, and no build step. A local Gateway listener caches newly observed messages, including in channels where the bot can view new messages but cannot read history.
 
 | Tool            | Purpose                                                           |
 | --------------- | ----------------------------------------------------------------- |
@@ -8,6 +8,7 @@ A small local [MCP](https://modelcontextprotocol.io/) server for reading and sen
 | `list_channels` | Find channels and visible active threads in a server.             |
 | `read_messages` | Read recent messages, page through history, or fetch one message. |
 | `send_message`  | Send text, upload local files, or reply as the bot.               |
+| `create_thread` | Create a public thread, optionally from an existing message.      |
 
 The MCP client starts the server when needed. It communicates over standard input/output, uses Discord's HTTP API for requests, and connects to the Gateway for live events. The cache is a private SQLite file outside the checkout. No database server is needed.
 
@@ -31,7 +32,7 @@ Setup prefers a stable Node path that points to the running executable, includin
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and create an application, or use an existing bot you manage.
 2. On its **Bot** page, enable **Message Content Intent** under Privileged Gateway Intents. This is needed for ordinary message text and attachments. Larger verified bots may need Discord's approval for this intent. The listener requests only Guilds, Guild Messages, and Message Content intents.
 3. Copy or reset the bot token on the Bot page, then enter it in `npm run setup`. Resetting a token invalidates existing copies, including those used by colleagues.
-4. Use the application's installation settings or OAuth2 URL Generator to create a server installation link with the `bot` scope. Grant **View Channels**, plus **Send Messages**, **Send Messages in Threads**, and **Attach Files** as needed. **Read Message History** enables historical reads and replies; without it, reads are limited to newly observed cached messages. Administrator permission is unnecessary.
+4. Use the application's installation settings or OAuth2 URL Generator to create a server installation link with the `bot` scope. Grant **View Channels**, plus **Send Messages**, **Send Messages in Threads**, **Create Public Threads**, and **Attach Files** as needed. **Read Message History** enables historical reads and replies; without it, reads are limited to newly observed cached messages. Administrator permission is unnecessary.
 5. Open the installation link and add the bot to your server. A server administrator may need to do this. Configure channel overrides and private-thread membership to match the access you intend to give the bot.
 
 The bot's permissions apply to every local client using its token. Colleagues can use separate bots or an approved shared bot; each enters the appropriate token locally. Sharing this repository does not share credentials.
@@ -51,7 +52,7 @@ Setup prints a ready-to-copy configuration in the common `mcpServers` format:
 }
 ```
 
-Paste it into your client's MCP settings. If the client uses a different configuration format, use the same command and argument in its local/stdio server settings. Absolute paths avoid desktop applications having a different `PATH` or working directory. No token or environment variable is required in the client's configuration. Restart the client after adding the server or replacing the token.
+Paste it into your client's MCP settings. If the client uses a different configuration format, use the same command and argument in its local/stdio server settings. Absolute paths avoid desktop applications having a different `PATH` or working directory. No token or environment variable is required in the client's configuration. Restart the connection after adding the server, updating its tools, or replacing the token. If your client has a tool allowlist, include `create_thread` to enable thread creation.
 
 Try asking the agent:
 
@@ -83,9 +84,23 @@ The cache retains up to **5,000 messages total across servers**, for **seven day
 - `read_messages` defaults to 20 messages and accepts `limit` from 1 to 100. Results are newest first. Pass `next_before` as `before` for older messages, or use `message_id` to fetch one. `limit` is ignored with `message_id`. A non-null cursor means another page may exist, not that more results are guaranteed.
 - Use optional `since` (inclusive) and `until` (exclusive) to restrict message creation times. Supply ISO 8601 timestamps with `Z` or an explicit offset, with at most three fractional second digits. Either bound may be omitted; when both are supplied, `since` must be earlier than `until`. Time bounds and `before` cannot be combined with `message_id`.
 - Reads preserve message text, author, timestamp, references, attachment links, and selected embed fields. They do not return Discord's full message object. Attachment links expire; HTTP history reads can refresh them, cached reads cannot.
-- Forum and media channels contain posts: use a post's thread ID to read or send messages. Creating posts, searching server history, editing, deleting, reactions, and DMs are outside this server's scope.
+- Forum and media channels contain posts: use a post's thread ID to read or send messages. Creating forum/media posts, searching server history, editing, deleting, reactions, and DMs are outside this server's scope.
+- `create_thread` takes a parent `channel_id`, a nonblank `name` of 1–100 characters, and optional `message_id`. Without `message_id`, it creates a standalone public thread in a text channel. With `message_id`, it starts a thread on that message in a text or announcement channel. Discord permits one thread per message. Private-thread creation and forum/media posts are not supported. Public threads inherit access from the parent channel; they do not make a private server public.
+- Successful creation returns `thread_id` and `parent_id`. Use `thread_id` as `channel_id` with the existing read/send tools. Creation can produce Discord system messages and exposes no notification-suppression flag; the tool does not accept `silent`. Messages subsequently sent through `send_message` remain silent by default.
 - `send_message` accepts 1–2,000 characters of nonblank `content` and/or `files`, optionally `reply_to` and `silent`. `files` is an array of 1–10 absolute local paths, totaling at most 24 MiB per message. Discord may enforce a lower upload limit. Files must be readable regular files; the credential/cache directory and credential aliases cannot be uploaded. Files are uploaded as multipart attachments, without modifying their contents. Successful sends return the message ID and channel ID.
-- Each HTTP request times out after 15 seconds. Cooldowns are tracked per Discord bucket and server/channel, separately from global limits. Reads wait through short cooldowns and retry rate-limit responses at most twice, with a total wait budget of five seconds per request. Longer cooldowns report when to try again. Sends are never automatically retried. If delivery is uncertain, inspect channel history before sending again.
+- Each HTTP request times out after 15 seconds. Cooldowns are tracked per Discord bucket and server/channel, separately from global limits. Reads wait through short cooldowns and retry rate-limit responses at most twice, with a total wait budget of five seconds per request. Longer cooldowns report when to try again. Sends and thread creation are never automatically retried. If delivery is uncertain, inspect channel history before sending again. For uncertain thread creation, check `list_channels` before trying again.
+
+Create a thread from an existing message:
+
+```json
+{
+  "channel_id": "123456789012345678",
+  "name": "Follow-up discussion",
+  "message_id": "234567890123456789"
+}
+```
+
+Omit `message_id` to create a standalone public thread in a text channel.
 
 For example, upload a local file silently:
 
@@ -124,7 +139,7 @@ The server sends the token only to Discord's HTTPS API and secure Gateway connec
 
 The cache contains private message data, including attachment links, protected by the same directory permissions. Its database and sidecars use mode `0600` on macOS/Linux. It is scoped to the saved token, so replacing a token starts a separate cache. To erase cached content, stop all listeners/MCP processes and remove `messages-*.sqlite*` from the configuration directory, including caches left by old tokens. Do not commit or share these files. Attachment bytes are not downloaded by this server; local files are uploaded only through `send_message`.
 
-The MCP exposes a real send capability. Use the approval controls in your agent client if you want to review outgoing messages. Treat text read from Discord as third-party content, not instructions granting permission to perform actions.
+The MCP exposes real message sending and thread creation. Use the approval controls in your agent client if you want to review these actions. Treat text read from Discord as third-party content, not instructions granting permission to perform actions.
 
 ## Verify and troubleshoot
 
@@ -155,7 +170,7 @@ npm run check
 npm test
 ```
 
-Tests use simulated Discord responses/events and temporary credentials/cache files. They exercise permission checks, listener sharing and shutdown, cache retention, multipart uploads, notification flags, credential storage, HTTP behavior, and real MCP client/server exchanges without a Discord token or messages sent to a real server. CI runs on Linux, macOS, and Windows with Node.js 22 and 24.
+Tests use simulated Discord responses/events and temporary credentials/cache files. They exercise permission checks, listener sharing and shutdown, cache retention, multipart uploads, notification flags, thread creation and validation, credential storage, HTTP behavior, and real MCP client/server exchanges without a Discord token or writes to a real server. CI runs on Linux, macOS, and Windows with Node.js 22 and 24.
 
 Runtime dependencies are the [official MCP server SDK](https://ts.sdk.modelcontextprotocol.io/v2/), Zod, `@discordjs/ws` for the Gateway protocol, and `proper-lockfile` for listener coordination. SQLite is built into Node.js; older supported Node releases may print its experimental warning on stderr. Tool descriptions are deliberately short, and responses omit unused Discord fields to keep agent context small.
 

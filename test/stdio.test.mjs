@@ -110,6 +110,11 @@ for (const mode of ["legacy", { pin: "2026-07-28" }]) {
       if (url === "https://discord.com/api/v10/users/@me/guilds?limit=100") return new Response(JSON.stringify([{ id: "123456789012345678", name: "Test server" }]));
       if (url === "https://discord.com/api/v10/channels/234567890123456789/messages?limit=1&before=1552832004096000000") return new Response(JSON.stringify([{ id: "1552469616230400000", channel_id: "234567890123456789", author: { id: "123456789012345678", username: "tester" }, timestamp: "2026-09-24T00:00:00Z", content: "Inside the time range" }]));
       if (url === "https://discord.com/api/v10/channels/234567890123456789/messages" && options.method === "POST") return new Response(JSON.stringify({ id: "345678901234567890", channel_id: "234567890123456789" }));
+      if (url === "https://discord.com/api/v10/channels/234567890123456789/threads" && options.method === "POST") {
+        const body = JSON.parse(options.body);
+        if (body.type !== 11 || body.name !== "Test thread") throw new Error("Unexpected thread request");
+        return Response.json({ id: "456789012345678901", parent_id: "234567890123456789" });
+      }
       throw new Error("Unexpected network request");
     };`,
     );
@@ -130,7 +135,7 @@ for (const mode of ["legacy", { pin: "2026-07-28" }]) {
     });
     t.after(() => client.close());
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 4);
+    assert.equal((await client.listTools()).tools.length, 5);
     const read = await client.callTool({ name: "list_servers", arguments: {} });
     assert.deepEqual(JSON.parse(read.content[0].text), {
       servers: [{ id: "123456789012345678", name: "Test server" }],
@@ -156,7 +161,16 @@ for (const mode of ["legacy", { pin: "2026-07-28" }]) {
       arguments: { channel_id: "234567890123456789", content: "Test message" },
     });
     assert.equal(JSON.parse(send.content[0].text).id, "345678901234567890");
-    assert.ok(!JSON.stringify([read, send]).includes(token));
+    const thread = await client.callTool({
+      name: "create_thread",
+      arguments: { channel_id: "234567890123456789", name: "Test thread" },
+    });
+    assert.ok(!thread.isError, JSON.stringify(thread));
+    assert.deepEqual(JSON.parse(thread.content[0].text), {
+      thread_id: "456789012345678901",
+      parent_id: "234567890123456789",
+    });
+    assert.ok(!JSON.stringify([read, send, thread]).includes(token));
     await client.close();
     assert.ok(!stderr.includes(token));
     assert.equal(
