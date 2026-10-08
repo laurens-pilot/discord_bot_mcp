@@ -135,7 +135,7 @@ for (const mode of ["legacy", { pin: "2026-07-28" }]) {
     });
     t.after(() => client.close());
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 5);
+    assert.equal((await client.listTools()).tools.length, 14);
     const read = await client.callTool({ name: "list_servers", arguments: {} });
     assert.deepEqual(JSON.parse(read.content[0].text), {
       servers: [{ id: "123456789012345678", name: "Test server" }],

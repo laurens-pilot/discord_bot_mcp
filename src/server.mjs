@@ -1,25 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { DiscordError } from "./discord.mjs";
-import { channelAccess } from "./access.mjs";
+import { channelAccess, createAccessChecker } from "./access.mjs";
 import { uploadBody } from "./uploads.mjs";
+import { messageSummary, pollInput, pollBody } from "./messages.mjs";
+import { registerFeatures } from "./tools.mjs";
+import { id, timestamp, readOnly, write } from "./schema.mjs";
 
-const id = z.string().regex(/^[0-9]{1,20}$/);
-const timestamp = z.iso
-  .datetime({ offset: true })
-  .refine(
-    (value) => Number.isFinite(Date.parse(value)) && !/\.\d{4}/.test(value),
-    "Use a valid timestamp with at most three fractional second digits.",
-  );
 const snowflakeCeiling = 1n << 64n;
 const discordEpoch = 1420070400000n;
-const readOnly = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: true,
-};
-const write = { ...readOnly, readOnlyHint: false, idempotentHint: false };
 const channelTypes = {
   0: "text",
   2: "voice",
@@ -35,47 +24,6 @@ const channelTypes = {
 
 function snowflakeAt(timestamp) {
   return (BigInt(Date.parse(timestamp)) - discordEpoch) << 22n;
-}
-
-function messageSummary(message) {
-  return {
-    id: message.id,
-    author: {
-      id: message.author.id,
-      name: message.author.global_name || message.author.username,
-    },
-    timestamp: message.timestamp,
-    content: message.content,
-    ...(message.type ? { type: message.type } : {}),
-    ...(message.message_reference
-      ? { reference: message.message_reference }
-      : {}),
-    ...(message.thread ? { thread_id: message.thread.id } : {}),
-    ...(message.attachments?.length
-      ? {
-          attachments: message.attachments.map(
-            ({ filename, url, content_type }) => ({
-              filename,
-              url,
-              content_type,
-            }),
-          ),
-        }
-      : {}),
-    ...(message.embeds?.length
-      ? {
-          embeds: message.embeds.map(
-            ({ title, description, url, fields, image }) => ({
-              title,
-              description,
-              url,
-              fields,
-              ...(image?.url ? { image_url: image.url } : {}),
-            }),
-          ),
-        }
-      : {}),
-  };
 }
 
 export function createServer(discord, { cache } = {}) {
@@ -135,21 +83,43 @@ export function createServer(discord, { cache } = {}) {
   register(
     "list_channels",
     "List server channels and visible active threads. Use a channel/thread id to read or send.",
-    z.object({ server_id: id }),
-    async ({ server_id }) => {
+    z.object({
+      server_id: id,
+      channel_id: id.optional(),
+      include_permissions: z.boolean().default(false),
+    }),
+    async ({ server_id, channel_id, include_permissions }) => {
       const channels = await discord.request(`/guilds/${server_id}/channels`);
       const { threads } = await discord.request(
         `/guilds/${server_id}/threads/active`,
       );
+      const selected = [...channels, ...threads].filter(
+        (channel) => !channel_id || channel.id === channel_id,
+      );
+      const check = createAccessChecker(discord, {
+        channels: [...channels, ...threads].map((channel) => ({
+          guild_id: server_id,
+          ...channel,
+        })),
+      });
+      const permissions = new Map();
+      if (include_permissions)
+        for (const channel of selected) {
+          try {
+            permissions.set(channel.id, (await check(channel.id)).capabilities);
+          } catch (error) {
+            if (![403, 404].includes(error.status)) throw error;
+            permissions.set(channel.id, { view: false });
+          }
+        }
       return {
-        channels: [...channels, ...threads].map(
-          ({ id, name, type, parent_id }) => ({
-            id,
-            name,
-            type: channelTypes[type] ?? type,
-            ...(parent_id ? { parent_id } : {}),
-          }),
-        ),
+        channels: selected.map(({ id, name, type, parent_id }) => ({
+          id,
+          name,
+          type: channelTypes[type] ?? type,
+          ...(parent_id ? { parent_id } : {}),
+          ...(include_permissions ? { permissions: permissions.get(id) } : {}),
+        })),
       };
     },
   );
@@ -247,15 +217,17 @@ export function createServer(discord, { cache } = {}) {
         .describe("Absolute file paths; 24 MiB total maximum.")
         .optional(),
       silent: z.boolean().default(true),
+      poll: pollInput.optional(),
     }),
-    async ({ channel_id, content, reply_to, files, silent }) => {
-      if (!content && !files?.length)
-        throw new DiscordError("Provide content or files.");
+    async ({ channel_id, content, reply_to, files, silent, poll }) => {
+      if (!content && !files?.length && !poll)
+        throw new DiscordError("Provide content, files or a poll.");
       const body = await uploadBody(
         {
           ...(content ? { content } : {}),
           ...(silent ? { flags: 4096 } : {}),
           allowed_mentions: { parse: [], replied_user: false },
+          ...(poll ? { poll: pollBody(poll) } : {}),
           ...(reply_to
             ? {
                 message_reference: {
@@ -271,7 +243,15 @@ export function createServer(discord, { cache } = {}) {
         `/channels/${channel_id}/messages`,
         body,
       );
-      return { id: message.id, channel_id: message.channel_id };
+      if (message?.channel_id !== channel_id)
+        throw new DiscordError(
+          "Unexpected send response. Delivery is uncertain; check the channel before sending again.",
+        );
+      return {
+        id: message.id,
+        channel_id: message.channel_id,
+        ...features.rememberSent(message),
+      };
     },
     write,
   );
@@ -316,5 +296,6 @@ export function createServer(discord, { cache } = {}) {
     write,
   );
 
+  const features = registerFeatures(register, discord, cache);
   return server;
 }

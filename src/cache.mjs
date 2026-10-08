@@ -53,6 +53,9 @@ export class MessageCache {
         CREATE INDEX IF NOT EXISTS channel_messages ON messages(channel_id, id);
         CREATE INDEX IF NOT EXISTS message_age ON messages(received_at);
         CREATE TABLE IF NOT EXISTS state (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS sent_messages (
+          id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, received_at INTEGER NOT NULL
+        );
       `);
       this.prune();
     } catch (error) {
@@ -84,7 +87,7 @@ export class MessageCache {
       ...(state.error ? { error: state.error } : {}),
       retention_days: 7,
       max_messages: MAX_MESSAGES,
-      note: "Observed messages only; offline periods, access changes and eviction leave gaps. Edits, deletions and attachment URLs may be stale.",
+      note: "Observed messages only; offline periods, access changes and eviction leave gaps. Edits, deletions, reactions, polls and attachment URLs may be stale. Missing counts are unknown.",
     };
   }
 
@@ -103,10 +106,21 @@ export class MessageCache {
           "thread",
           "attachments",
           "embeds",
+          "edited_timestamp",
+          "pinned",
+          "poll",
+          "reactions",
+          "sticker_items",
+          "mentions",
+          "mention_roles",
+          "mention_everyone",
+          "webhook_id",
+          "message_snapshots",
         ]
           .filter((field) => data[field] !== undefined)
           .map((field) => [field, data[field]]),
       );
+      selected.reactions ??= [];
       const encoded = JSON.stringify(selected);
       if (Buffer.byteLength(encoded) > 65536) return;
       this.#db
@@ -132,6 +146,14 @@ export class MessageCache {
         "embeds",
         "message_reference",
         "thread",
+        "edited_timestamp",
+        "pinned",
+        "poll",
+        "reactions",
+        "sticker_items",
+        "mentions",
+        "mention_roles",
+        "mention_everyone",
       ])
         if (data[field] !== undefined) previous[field] = data[field];
       const encoded = JSON.stringify(previous);
@@ -139,12 +161,69 @@ export class MessageCache {
         this.#db
           .prepare("UPDATE messages SET data = ? WHERE id = ?")
           .run(encoded, key(data.id));
+    } else if (
+      type.startsWith("MESSAGE_REACTION_") ||
+      type.startsWith("MESSAGE_POLL_VOTE_")
+    ) {
+      const row = this.#db
+        .prepare("SELECT data FROM messages WHERE id = ? AND channel_id = ?")
+        .get(key(data.message_id), data.channel_id);
+      if (!row) return;
+      const message = JSON.parse(row.data);
+      if (type.startsWith("MESSAGE_POLL_VOTE_")) {
+        if (message.poll) delete message.poll.results;
+      } else if (type === "MESSAGE_REACTION_REMOVE_ALL") message.reactions = [];
+      else {
+        if (!Array.isArray(message.reactions)) return;
+        const matches = (reaction) =>
+          reaction.emoji.id
+            ? reaction.emoji.id === data.emoji.id
+            : reaction.emoji.name === data.emoji.name;
+        const reactions = message.reactions ?? [];
+        let reaction = reactions.find(matches);
+        if (type === "MESSAGE_REACTION_ADD") {
+          if (!reaction) {
+            reaction = {
+              emoji: data.emoji,
+              count: 0,
+              count_details: { normal: 0, burst: 0 },
+            };
+            reactions.push(reaction);
+          }
+          reaction.count++;
+          if (reaction.count_details)
+            reaction.count_details[data.burst ? "burst" : "normal"]++;
+        } else if (type === "MESSAGE_REACTION_REMOVE" && reaction) {
+          reaction.count = Math.max(0, reaction.count - 1);
+          if (reaction.count_details) {
+            const key = data.burst ? "burst" : "normal";
+            reaction.count_details[key] = Math.max(
+              0,
+              reaction.count_details[key] - 1,
+            );
+          }
+        }
+        message.reactions = reactions.filter(
+          (item) =>
+            item.count > 0 &&
+            !(type === "MESSAGE_REACTION_REMOVE_EMOJI" && matches(item)),
+        );
+      }
+      const encoded = JSON.stringify(message);
+      if (Buffer.byteLength(encoded) <= 65536)
+        this.#db
+          .prepare("UPDATE messages SET data = ? WHERE id = ?")
+          .run(encoded, key(data.message_id));
     } else if (["MESSAGE_DELETE", "MESSAGE_DELETE_BULK"].includes(type)) {
       const remove = this.#db.prepare(
         "DELETE FROM messages WHERE id = ? AND channel_id = ?",
       );
-      for (const id of data.ids ?? [data.id])
+      for (const id of data.ids ?? [data.id]) {
         remove.run(key(id), data.channel_id);
+        this.#db
+          .prepare("DELETE FROM sent_messages WHERE id = ? AND channel_id = ?")
+          .run(key(id), data.channel_id);
+      }
     } else if (["CHANNEL_DELETE", "THREAD_DELETE"].includes(type)) {
       this.#db
         .prepare("DELETE FROM messages WHERE channel_id = ?")
@@ -155,6 +234,14 @@ export class MessageCache {
   }
 
   prune() {
+    this.#db
+      .prepare("DELETE FROM sent_messages WHERE received_at < ?")
+      .run(this.#now() - MAX_AGE);
+    this.#db
+      .prepare(
+        "DELETE FROM sent_messages WHERE id IN (SELECT id FROM sent_messages ORDER BY received_at DESC, id DESC LIMIT -1 OFFSET ?)",
+      )
+      .run(MAX_MESSAGES);
     this.#db
       .prepare("DELETE FROM messages WHERE received_at < ?")
       .run(this.#now() - MAX_AGE);
@@ -191,5 +278,29 @@ export class MessageCache {
 
   close() {
     this.#db.close();
+  }
+
+  rememberSent(channelId, messageId) {
+    this.#db
+      .prepare("INSERT OR REPLACE INTO sent_messages VALUES (?, ?, ?)")
+      .run(key(messageId), channelId, this.#now());
+    this.prune();
+  }
+
+  wasSent(channelId, messageId) {
+    this.prune();
+    return Boolean(
+      this.#db
+        .prepare("SELECT id FROM sent_messages WHERE id = ? AND channel_id = ?")
+        .get(key(messageId), channelId),
+    );
+  }
+
+  serverMessages(serverId) {
+    this.prune();
+    return this.#db
+      .prepare("SELECT data FROM messages WHERE guild_id = ? ORDER BY id DESC")
+      .all(serverId)
+      .map((row) => JSON.parse(row.data));
   }
 }

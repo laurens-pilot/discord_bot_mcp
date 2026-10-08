@@ -146,3 +146,73 @@ test(
     }
   },
 );
+
+test("cache tracks reaction changes and invalidates poll tallies when votes change", async (t) => {
+  const { cache } = await fixture(t);
+  const emoji = { id: null, name: "👍" };
+  cache.capture({
+    t: "MESSAGE_CREATE",
+    d: {
+      ...message("1"),
+      pinned: true,
+      poll: {
+        question: { text: "Q" },
+        answers: [],
+        results: { is_finalized: false, answer_counts: [{ id: 1, count: 2 }] },
+      },
+    },
+  });
+  const event = (t, extra = {}) =>
+    cache.capture({
+      t,
+      d: { channel_id: "20", message_id: "1", emoji, ...extra },
+    });
+  const current = () => cache.read("20", { message_id: "1" }).messages[0];
+  event("MESSAGE_REACTION_ADD");
+  event("MESSAGE_REACTION_ADD", { burst: true });
+  assert.equal(current().reactions[0].count, 2);
+  assert.deepEqual(current().reactions[0].count_details, {
+    normal: 1,
+    burst: 1,
+  });
+  event("MESSAGE_REACTION_REMOVE", { burst: true });
+  assert.equal(current().reactions[0].count, 1);
+  event("MESSAGE_REACTION_REMOVE_EMOJI");
+  assert.deepEqual(current().reactions, []);
+  event("MESSAGE_REACTION_ADD");
+  event("MESSAGE_REACTION_REMOVE_ALL");
+  assert.deepEqual(current().reactions, []);
+  event("MESSAGE_POLL_VOTE_ADD", { answer_id: 1 });
+  assert.equal(current().poll.results, undefined);
+  cache.capture({
+    t: "MESSAGE_UPDATE",
+    d: {
+      id: "1",
+      channel_id: "20",
+      pinned: false,
+      edited_timestamp: "2026-10-08T00:00:00Z",
+    },
+  });
+  assert.equal(current().pinned, false);
+  assert.equal(current().edited_timestamp, "2026-10-08T00:00:00Z");
+  event("MESSAGE_REACTION_ADD", { channel_id: "21" });
+  assert.deepEqual(current().reactions, []);
+});
+
+test("send receipts survive reopening, stay channel-scoped, expire, and are removed on deletion", async (t) => {
+  let now = Date.now();
+  const { cache, file } = await fixture(t, { now: () => now });
+  cache.rememberSent("20", "1");
+  const reopened = new MessageCache(file, { now: () => now });
+  try {
+    assert.equal(reopened.wasSent("20", "1"), true);
+    assert.equal(reopened.wasSent("21", "1"), false);
+  } finally {
+    reopened.close();
+  }
+  cache.capture({ t: "MESSAGE_DELETE", d: { channel_id: "20", id: "1" } });
+  assert.equal(cache.wasSent("20", "1"), false);
+  cache.rememberSent("20", "2");
+  now += 7 * 86400000 + 1;
+  assert.equal(cache.wasSent("20", "2"), false);
+});

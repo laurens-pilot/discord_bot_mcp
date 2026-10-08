@@ -91,7 +91,7 @@ test("Gateway wiring requests the needed intents, forwards message events and re
     { postMessage: (event) => events.push(event) },
     Manager,
   );
-  assert.equal(options.intents, 1 | 512 | 32768);
+  assert.equal(options.intents, 1 | 512 | 1024 | 32768 | 16777216);
   assert.equal(options.token, "secret-token");
   assert.equal(events.at(-1).status, "live");
   manager.emit("dispatch", { t: "MESSAGE_CREATE", d: { id: "1" } });

@@ -56,7 +56,7 @@ async function session(t, handler) {
   };
 }
 
-test("exactly five compact tools with correct read/write annotations", async (t) => {
+test("exactly fourteen compact tools with correct read/write annotations", async (t) => {
   const { client, calls } = await session(t, () => {
     throw new Error("No network during discovery");
   });
@@ -69,18 +69,42 @@ test("exactly five compact tools with correct read/write annotations", async (t)
       "read_messages",
       "send_message",
       "create_thread",
+      "search_messages",
+      "edit_message",
+      "delete_message",
+      "list_threads",
+      "list_pins",
+      "set_reaction",
+      "list_reaction_users",
+      "list_poll_voters",
+      "end_poll",
     ],
   );
   assert.deepEqual(
     tools.map(({ annotations }) => annotations.readOnlyHint),
-    [true, true, true, false, false],
+    [
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      false,
+    ],
   );
   assert.equal(tools[3].annotations.idempotentHint, false);
   assert.equal(tools[4].annotations.idempotentHint, false);
   assert.equal(tools[4].annotations.destructiveHint, false);
   const size = Buffer.byteLength(JSON.stringify(tools));
-  assert.ok(size < 4000, `Tool catalog grew to ${size} bytes`);
-  t.diagnostic(`Five-tool catalog: ${size} JSON bytes`);
+  assert.ok(size < 15000, `Tool catalog grew to ${size} bytes`);
+  t.diagnostic(`Fourteen-tool catalog: ${size} JSON bytes`);
   assert.equal(calls.length, 0);
 });
 
@@ -471,7 +495,10 @@ test("message summaries preserve useful content without dumping the full Discord
 });
 
 test("sends and replies suppress every mention and preserve text", async (t) => {
-  const { call, calls } = await session(t, () => message);
+  const { call, calls } = await session(t, ({ path }) => ({
+    ...message,
+    channel_id: path.split("/")[2],
+  }));
   const content =
     " @everyone <@123456789012345678> <@&234567890123456789> hello\n";
   assert.deepEqual(

@@ -351,3 +351,61 @@ test("requests are serialized and errors do not poison the queue", async () => {
   assert.equal(results[0].status, "rejected");
   assert.equal(results[1].status, "fulfilled");
 });
+
+test("explicit write methods accept 204 and never retry bodyless writes or ambiguous responses", async () => {
+  for (const method of ["PUT", "PATCH", "DELETE", "POST"]) {
+    const body = method === "PATCH" ? { content: "updated" } : undefined;
+    const success = new Discord(token, async (_url, options) => {
+      assert.equal(options.method, method);
+      return new Response(null, { status: 204 });
+    });
+    assert.equal(
+      await success.request("/channels/1/messages/2", body, method),
+      undefined,
+    );
+    for (const failure of [
+      () => {
+        throw new Error(token);
+      },
+      () => json({}, 502),
+      () => new Response("invalid JSON"),
+      () => json({ retry_after: 0 }, 429),
+    ]) {
+      let calls = 0;
+      const discord = new Discord(token, async () => {
+        calls++;
+        return failure();
+      });
+      await assert.rejects(
+        discord.request("/channels/1/messages/2", body, method),
+        (error) =>
+          /uncertain|rate limit/.test(error.message) &&
+          !error.message.includes(token),
+      );
+      assert.equal(calls, 1);
+    }
+  }
+});
+
+test("known cooldowns fail bodyless mutations without waiting or issuing a request", async (t) => {
+  const time = clock(t);
+  let calls = 0;
+  const discord = new Discord(
+    token,
+    async () => {
+      calls++;
+      return json({ retry_after: 1, global: true }, 429);
+    },
+    time,
+  );
+  await assert.rejects(
+    discord.request("/channels/1/messages", {}, "POST"),
+    /rate limit/,
+  );
+  await assert.rejects(
+    discord.request("/channels/1/messages/2", undefined, "DELETE"),
+    /rate limit/,
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(time.waits, []);
+});

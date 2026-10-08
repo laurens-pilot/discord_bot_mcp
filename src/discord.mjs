@@ -4,7 +4,12 @@ const API = "https://discord.com/api/v10";
 const USER_AGENT =
   "DiscordBot (https://github.com/laurens-pilot/discord_bot_mcp, 0.1.0)";
 
-export class DiscordError extends Error {}
+export class DiscordError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
 
 export class Discord {
   #token;
@@ -21,8 +26,8 @@ export class Discord {
     this.#sleep = sleep;
   }
 
-  request(path, body) {
-    const result = this.#queue.then(() => this.#request(path, body));
+  request(path, body, method = body ? "POST" : "GET") {
+    const result = this.#queue.then(() => this.#request(path, body, method));
     this.#queue = result.catch(() => {});
     return result;
   }
@@ -31,8 +36,8 @@ export class Discord {
     return `${this.#buckets.get(route) ?? route}:${major}`;
   }
 
-  async #request(path, body, retries = 0, waitBudget = 5000) {
-    const method = body ? "POST" : "GET";
+  async #request(path, body, method, retries = 0, waitBudget = 5000) {
+    const writing = method !== "GET";
     const pathname = path.split("?")[0];
     const route = `${method} ${pathname.replace(/\/\d+/g, "/:id")}`;
     const major = pathname.match(/^\/(channels|guilds)\/(\d+)/)?.[0] ?? "";
@@ -43,17 +48,19 @@ export class Discord {
         this.#readyAt.get(`${route}:${major}`) ?? 0,
       ) - Date.now();
     if (wait > 0) {
-      if (body || wait > waitBudget)
+      if (writing || wait > waitBudget)
         throw new DiscordError(
           `Discord rate limit: retry in ${Math.ceil(wait / 1000)} seconds.`,
         );
       await this.#sleep(wait);
-      return this.#request(path, body, retries, waitBudget - wait);
+      return this.#request(path, body, method, retries, waitBudget - wait);
     }
-    const uncertain = body
+    const uncertain = writing
       ? pathname.endsWith("/threads")
         ? " Thread creation is uncertain; use list_channels to check for the thread before trying again."
-        : " Delivery is uncertain; read the channel before trying to send again."
+        : method === "POST" && pathname.endsWith("/messages")
+          ? " Delivery is uncertain; read the channel before trying to send again."
+          : " The change is uncertain; check the message before trying again."
       : " Try again later.";
     let response;
     let data;
@@ -76,7 +83,10 @@ export class Discord {
         signal: AbortSignal.timeout(15000),
         redirect: "error",
       });
-      data = await response.json().catch(() => null);
+      data =
+        response.status === 204
+          ? undefined
+          : await response.json().catch(() => null);
     } catch {
       throw new DiscordError(
         `Discord request failed or timed out.${uncertain}`,
@@ -112,13 +122,13 @@ export class Discord {
 
     if (response.status === 429) {
       if (
-        !body &&
+        !writing &&
         retries < 2 &&
         Number.isFinite(reset) &&
         reset >= 0 &&
         Math.ceil(reset * 1000) <= waitBudget
       )
-        return this.#request(path, body, retries + 1, waitBudget);
+        return this.#request(path, body, method, retries + 1, waitBudget);
       throw new DiscordError(
         `Discord rate limit: retry in ${reset > 0 && Number.isFinite(reset) ? Math.ceil(reset) : "a few"} seconds.`,
       );
@@ -130,10 +140,12 @@ export class Discord {
     if (response.status === 403)
       throw new DiscordError(
         "Discord denied access. Check the bot's server, channel, and thread permissions.",
+        403,
       );
     if (response.status === 404)
       throw new DiscordError(
         "Discord could not find that server, channel, or message, or the bot cannot access it.",
+        404,
       );
     if (!response.ok) {
       const code = Number.isInteger(data?.code) ? `, code ${data.code}` : "";

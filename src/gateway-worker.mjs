@@ -9,7 +9,7 @@ export function runGateway(token, port, Manager = WebSocketManager) {
   const report = (status, error) => port.postMessage({ status, error });
   const manager = new Manager({
     token,
-    intents: 1 | 512 | 32768,
+    intents: 1 | 512 | 1024 | 32768 | 16777216,
     rest: {
       get: async (path) => {
         const data = await discord.request(path);
@@ -29,6 +29,12 @@ export function runGateway(token, port, Manager = WebSocketManager) {
         "MESSAGE_UPDATE",
         "MESSAGE_DELETE",
         "MESSAGE_DELETE_BULK",
+        "MESSAGE_REACTION_ADD",
+        "MESSAGE_REACTION_REMOVE",
+        "MESSAGE_REACTION_REMOVE_ALL",
+        "MESSAGE_REACTION_REMOVE_EMOJI",
+        "MESSAGE_POLL_VOTE_ADD",
+        "MESSAGE_POLL_VOTE_REMOVE",
         "CHANNEL_DELETE",
         "THREAD_DELETE",
         "GUILD_DELETE",
